@@ -15,14 +15,15 @@ import (
 )
 
 type Handlers struct {
-	kindeAuth    *auth.KindeAuth
-	gmailOAuth   *gmail.GmailOAuth
-	gmailClient  *gmail.GmailClient
-	tenantStore  *datastore.TenantStore
-	accountStore *datastore.AccountStore
-	bqStore      *storage.BigQueryStore
-	projectID    string
-	pubsubTopic  string
+	kindeAuth       *auth.KindeAuth
+	gmailOAuth      *gmail.GmailOAuth
+	gmailClient     *gmail.GmailClient
+	tenantStore     *datastore.TenantStore
+	accountStore    *datastore.AccountStore
+	bqStore         *storage.BigQueryStore
+	projectID       string
+	pubsubTopic     string
+	frontendBaseURL string
 }
 
 func NewHandlers(
@@ -34,16 +35,18 @@ func NewHandlers(
 	bqStore *storage.BigQueryStore,
 	projectID string,
 	pubsubTopic string,
+	frontendBaseURL string,
 ) *Handlers {
 	return &Handlers{
-		kindeAuth:    kindeAuth,
-		gmailOAuth:   gmailOAuth,
-		gmailClient:  gmailClient,
-		tenantStore:  tenantStore,
-		accountStore: accountStore,
-		bqStore:      bqStore,
-		projectID:    projectID,
-		pubsubTopic:  pubsubTopic,
+		kindeAuth:       kindeAuth,
+		gmailOAuth:      gmailOAuth,
+		gmailClient:     gmailClient,
+		tenantStore:     tenantStore,
+		accountStore:    accountStore,
+		bqStore:         bqStore,
+		projectID:       projectID,
+		pubsubTopic:     pubsubTopic,
+		frontendBaseURL: frontendBaseURL,
 	}
 }
 
@@ -130,20 +133,52 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create email account with encrypted tokens
-	account, err := h.accountStore.CreateAccount(
-		ctx,
-		tenant.Namespace,
-		tenant.OrgID,
-		tokenResp.Email,
-		tokenResp.AccessToken,
-		tokenResp.RefreshToken,
-		tokenResp.Expiry,
-	)
-	if err != nil {
-		log.Printf("Failed to create account: %v", err)
-		http.Error(w, "failed to create account", http.StatusInternalServerError)
-		return
+	// Normalize email for consistent lookups
+	tokenResp.Email = strings.ToLower(tokenResp.Email)
+
+	// Either update existing account in this tenant or create a new one
+	var accountID string
+	if lookup, lerr := h.accountStore.GetAccountByEmail(ctx, tokenResp.Email); lerr == nil {
+		// Email already known
+		// Ensure it belongs to this tenant; if not, reject
+		if lookup.Namespace != tenant.Namespace {
+			log.Printf("Email %s already connected to a different tenant (ns=%s)", tokenResp.Email, lookup.Namespace)
+			http.Error(w, "email already connected to another organization", http.StatusConflict)
+			return
+		}
+
+		// Update tokens on existing account
+		if err := h.accountStore.UpdateTokens(
+			ctx,
+			tenant.Namespace,
+			tenant.OrgID,
+			lookup.AccountID,
+			tokenResp.AccessToken,
+			tokenResp.RefreshToken,
+			tokenResp.Expiry,
+		); err != nil {
+			log.Printf("Failed to update tokens for account: %v", err)
+			http.Error(w, "failed to update account tokens", http.StatusInternalServerError)
+			return
+		}
+		accountID = lookup.AccountID
+	} else {
+		// Create new account
+		account, err := h.accountStore.CreateAccount(
+			ctx,
+			tenant.Namespace,
+			tenant.OrgID,
+			tokenResp.Email,
+			tokenResp.AccessToken,
+			tokenResp.RefreshToken,
+			tokenResp.Expiry,
+		)
+		if err != nil {
+			log.Printf("Failed to create account: %v", err)
+			http.Error(w, "failed to create account", http.StatusInternalServerError)
+			return
+		}
+		accountID = account.AccountID
 	}
 
 	// Setup Gmail push notifications
@@ -154,13 +189,13 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 		// Don't fail - account is still created
 	} else {
 		// Update account with webhook info
-		if err := h.accountStore.UpdateWebhookInfo(ctx, tenant.Namespace, account.AccountID, watchResp.ChannelID, watchResp.Expiration); err != nil {
+		if err := h.accountStore.UpdateWebhookInfo(ctx, tenant.Namespace, accountID, watchResp.ChannelID, watchResp.Expiration); err != nil {
 			log.Printf("Failed to update webhook info: %v", err)
 		}
 	}
 
 	// Redirect to frontend
-	redirectURL := fmt.Sprintf("http://localhost:3005/dashboard?connected=%s", account.AccountID)
+	redirectURL := fmt.Sprintf("%s/dashboard?connected=%s", h.frontendBaseURL, accountID)
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 

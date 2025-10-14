@@ -3,6 +3,7 @@ package datastore
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/datastore"
@@ -49,6 +50,8 @@ type EmailAccountLookup struct {
 
 func (a *AccountStore) CreateAccount(ctx context.Context, namespace, orgID, emailAddress, accessToken, refreshToken string, tokenExpiry time.Time) (*EmailAccount, error) {
 	accountID := uuid.New().String()
+	// Normalize email to lowercase for consistent lookup keys
+	emailAddress = strings.ToLower(emailAddress)
 
 	// Encrypt tokens using KMS
 	encryptedAccess, err := a.kmsService.Encrypt(ctx, orgID, accessToken)
@@ -183,6 +186,8 @@ func (a *AccountStore) UpdateWebhookInfo(ctx context.Context, namespace, account
 }
 
 func (a *AccountStore) GetAccountByEmail(ctx context.Context, emailAddress string) (*EmailAccountLookup, error) {
+	// Normalize email to lowercase for consistent lookups
+	emailAddress = strings.ToLower(emailAddress)
 	key := datastore.NameKey("EmailAccountLookup", emailAddress, nil)
 	key.Namespace = DefaultNamespace
 

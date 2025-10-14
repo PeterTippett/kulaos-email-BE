@@ -33,6 +33,9 @@ type Config struct {
 	// Backend
 	BackendPort string
 
+	// Frontend
+	FrontendBaseURL string
+
 	// Pub/Sub
 	PubSubTopic string
 }
@@ -55,6 +58,7 @@ func Load() (*Config, error) {
 		GmailClientSecret:            getEnvOrPanic("GMAIL_CLIENT_SECRET"),
 		GmailRedirectURI:             getEnvOrPanic("GMAIL_REDIRECT_URI"),
 		BackendPort:                  getEnvOrDefault("BACKEND_PORT", "8085"),
+		FrontendBaseURL:              getEnvOrPanic("FRONTEND_BASE_URL"),
 		PubSubTopic:                  getEnvOrPanic("PUBSUB_TOPIC"),
 	}
 
