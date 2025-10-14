@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/kms v1.15.7
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
+	github.com/k3a/html2text v1.2.1
 	golang.org/x/oauth2 v0.16.0
 	google.golang.org/api v0.162.0
 	google.golang.org/protobuf v1.32.0
