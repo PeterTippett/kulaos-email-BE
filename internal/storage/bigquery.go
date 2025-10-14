@@ -76,6 +76,9 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 		// Table already exists - check if it needs schema updates
 		hasBodyHTML := false
 		hasBodyMarkdown := false
+		messageIDRequired := false
+		hasClustering := false
+
 		for _, f := range md.Schema {
 			if f.Name == "body_html" {
 				hasBodyHTML = true
@@ -83,11 +86,21 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 			if f.Name == "body_markdown" {
 				hasBodyMarkdown = true
 			}
+			if f.Name == "message_id" && f.Required {
+				messageIDRequired = true
+			}
+		}
+
+		// Check if clustering is configured
+		if md.Clustering != nil && len(md.Clustering.Fields) > 0 {
+			hasClustering = true
 		}
 
 		// Add missing fields if needed
 		var newSchema bigquery.Schema
-		if !hasBodyHTML || !hasBodyMarkdown {
+		var needsUpdate bool
+
+		if !hasBodyHTML || !hasBodyMarkdown || !messageIDRequired {
 			newSchema = make(bigquery.Schema, len(md.Schema))
 			copy(newSchema, md.Schema)
 
@@ -97,6 +110,7 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 					Type:     bigquery.StringFieldType,
 					Required: false,
 				})
+				needsUpdate = true
 			}
 			if !hasBodyMarkdown {
 				newSchema = append(newSchema, &bigquery.FieldSchema{
@@ -104,8 +118,22 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 					Type:     bigquery.StringFieldType,
 					Required: false,
 				})
+				needsUpdate = true
 			}
+			if !messageIDRequired {
+				// Make message_id required for uniqueness
+				for _, field := range newSchema {
+					if field.Name == "message_id" {
+						field.Required = true
+						needsUpdate = true
+						break
+					}
+				}
+			}
+		}
 
+		// Update schema if needed
+		if needsUpdate {
 			update := bigquery.TableMetadataToUpdate{
 				Schema: newSchema,
 			}
@@ -113,6 +141,19 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 				return fmt.Errorf("failed to update table schema: %w", uerr)
 			}
 		}
+
+		// Add clustering if not present
+		if !hasClustering {
+			update := bigquery.TableMetadataToUpdate{
+				Clustering: &bigquery.Clustering{
+					Fields: []string{"message_id", "account_id"},
+				},
+			}
+			if _, uerr := table.Update(ctx, update, md.ETag); uerr != nil {
+				return fmt.Errorf("failed to add clustering: %w", uerr)
+			}
+		}
+
 		return nil
 	}
 
@@ -122,10 +163,22 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 		return fmt.Errorf("failed to infer schema: %w", err)
 	}
 
+	// Add unique constraint to message_id field
+	for _, field := range schema {
+		if field.Name == "message_id" {
+			field.Required = true
+			break
+		}
+	}
+
 	metadata := &bigquery.TableMetadata{
 		Schema: schema,
 		TimePartitioning: &bigquery.TimePartitioning{
 			Field: "received_at",
+		},
+		// Add clustering for better performance on message_id lookups
+		Clustering: &bigquery.Clustering{
+			Fields: []string{"message_id", "account_id"},
 		},
 	}
 
@@ -136,7 +189,8 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 	return nil
 }
 
-// InsertMessages inserts multiple email messages into BigQuery
+// InsertMessages upserts multiple email messages into BigQuery
+// If a message with the same message_id already exists, it will be updated
 func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
 	if len(messages) == 0 {
 		return nil
@@ -150,29 +204,102 @@ func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, 
 		return err
 	}
 
-	// Convert to BigQuery records
-	records := make([]*EmailRecord, len(messages))
-	for i, msg := range messages {
-		records[i] = &EmailRecord{
-			MessageID:    msg.MessageID,
-			ThreadID:     msg.ThreadID,
-			AccountID:    accountID,
-			Sender:       msg.Sender,
-			Subject:      msg.Subject,
-			BodyText:     msg.BodyText,
-			BodyHTML:     msg.BodyHTML,
-			BodyMarkdown: msg.BodyMarkdown,
-			ReceivedAt:   msg.ReceivedAt,
-			IngestedAt:   time.Now(),
-			IsRead:       msg.IsRead,
-			Labels:       msg.Labels,
+	// Process messages one by one to handle upserts
+	for _, msg := range messages {
+		if err := b.upsertMessage(ctx, datasetName, msg, accountID); err != nil {
+			return fmt.Errorf("failed to upsert message %s: %w", msg.MessageID, err)
 		}
 	}
 
-	// Insert records
-	inserter := b.client.Dataset(datasetName).Table("emails").Inserter()
-	if err := inserter.Put(ctx, records); err != nil {
-		return fmt.Errorf("failed to insert messages: %w", err)
+	return nil
+}
+
+// upsertMessage performs an upsert operation for a single email message
+func (b *BigQueryStore) upsertMessage(ctx context.Context, datasetName string, msg *types.EmailMessage, accountID string) error {
+	// Create a temporary table for the new data
+	tempTableName := fmt.Sprintf("temp_email_%d", time.Now().UnixNano())
+	tempTable := b.client.Dataset(datasetName).Table(tempTableName)
+
+	// Create temporary table with same schema
+	schema, err := bigquery.InferSchema(EmailRecord{})
+	if err != nil {
+		return fmt.Errorf("failed to infer schema: %w", err)
+	}
+
+	tempMetadata := &bigquery.TableMetadata{
+		Schema: schema,
+	}
+
+	if err := tempTable.Create(ctx, tempMetadata); err != nil {
+		return fmt.Errorf("failed to create temp table: %w", err)
+	}
+
+	// Clean up temp table when done
+	defer func() {
+		if err := tempTable.Delete(ctx); err != nil {
+			// Log error but don't fail the operation
+			fmt.Printf("Warning: failed to delete temp table %s: %v\n", tempTableName, err)
+		}
+	}()
+
+	// Insert the new record into temp table
+	record := &EmailRecord{
+		MessageID:    msg.MessageID,
+		ThreadID:     msg.ThreadID,
+		AccountID:    accountID,
+		Sender:       msg.Sender,
+		Subject:      msg.Subject,
+		BodyText:     msg.BodyText,
+		BodyHTML:     msg.BodyHTML,
+		BodyMarkdown: msg.BodyMarkdown,
+		ReceivedAt:   msg.ReceivedAt,
+		IngestedAt:   time.Now(),
+		IsRead:       msg.IsRead,
+		Labels:       msg.Labels,
+	}
+
+	inserter := tempTable.Inserter()
+	if err := inserter.Put(ctx, record); err != nil {
+		return fmt.Errorf("failed to insert into temp table: %w", err)
+	}
+
+	// Perform MERGE operation
+	mergeQuery := fmt.Sprintf(`
+		MERGE `+"`%s.emails`"+` AS target
+		USING `+"`%s.%s`"+` AS source
+		ON target.message_id = source.message_id AND target.account_id = source.account_id
+		WHEN MATCHED THEN
+			UPDATE SET
+				thread_id = source.thread_id,
+				sender = source.sender,
+				subject = source.subject,
+				body_text = source.body_text,
+				body_html = source.body_html,
+				body_markdown = source.body_markdown,
+				received_at = source.received_at,
+				ingested_at = source.ingested_at,
+				is_read = source.is_read,
+				labels = source.labels
+		WHEN NOT MATCHED THEN
+			INSERT ROW
+	`, datasetName, datasetName, tempTableName)
+
+	query := b.client.Query(mergeQuery)
+	query.Location = b.location
+
+	job, err := query.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to run merge query: %w", err)
+	}
+
+	// Wait for the job to complete
+	status, err := job.Wait(ctx)
+	if err != nil {
+		return fmt.Errorf("merge job failed: %w", err)
+	}
+
+	if status.Err() != nil {
+		return fmt.Errorf("merge job completed with error: %w", status.Err())
 	}
 
 	return nil
