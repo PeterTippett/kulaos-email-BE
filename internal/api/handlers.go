@@ -192,6 +192,10 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 		if err := h.accountStore.UpdateWebhookInfo(ctx, tenant.Namespace, accountID, watchResp.ChannelID, watchResp.Expiration); err != nil {
 			log.Printf("Failed to update webhook info: %v", err)
 		}
+		// Record starting history ID for incremental sync
+		if err := h.accountStore.UpdateLastHistoryID(ctx, tenant.Namespace, accountID, watchResp.StartHistoryID); err != nil {
+			log.Printf("Failed to update starting history ID: %v", err)
+		}
 	}
 
 	// Redirect to frontend

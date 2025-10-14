@@ -22,8 +22,9 @@ func NewGmailClient(oauth *GmailOAuth) *GmailClient {
 }
 
 type WatchResponse struct {
-	ChannelID  string
-	Expiration time.Time
+	ChannelID      string
+	Expiration     time.Time
+	StartHistoryID int64
 }
 
 // SetupWatch sets up Gmail push notifications
@@ -49,8 +50,9 @@ func (g *GmailClient) SetupWatch(ctx context.Context, accessToken, refreshToken,
 	expiration := time.Unix(0, expirationMs*int64(time.Millisecond))
 
 	return &WatchResponse{
-		ChannelID:  fmt.Sprintf("%d", watchResp.HistoryId),
-		Expiration: expiration,
+		ChannelID:      fmt.Sprintf("%d", watchResp.HistoryId),
+		Expiration:     expiration,
+		StartHistoryID: int64(watchResp.HistoryId),
 	}, nil
 }
 
@@ -95,7 +97,7 @@ func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToke
 	return messages, nil
 }
 
-// FetchNewMessages fetches messages since a given history ID
+// FetchNewMessages fetches messages since a given history ID (legacy, single page)
 func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refreshToken string, historyID uint64) ([]*types.EmailMessage, error) {
 	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
@@ -121,6 +123,51 @@ func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refresh
 	}
 
 	return messages, nil
+}
+
+// FetchNewMessagesPaged fetches messages since a given history ID, following pages and returning the latest history ID seen
+func (g *GmailClient) FetchNewMessagesPaged(ctx context.Context, accessToken, refreshToken string, startHistoryID int64) ([]*types.EmailMessage, int64, error) {
+	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create gmail service: %w", err)
+	}
+
+	var allMessages []*types.EmailMessage
+	var pageToken string
+	var latestHistoryID int64 = startHistoryID
+
+	for {
+		call := gmailService.Users.History.List("me").StartHistoryId(uint64(latestHistoryID))
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		history, err := call.Do()
+		if err != nil {
+			return nil, latestHistoryID, fmt.Errorf("failed to fetch history: %w", err)
+		}
+
+		for _, h := range history.History {
+			if int64(h.Id) > latestHistoryID {
+				latestHistoryID = int64(h.Id)
+			}
+			for _, msg := range h.MessagesAdded {
+				fullMsg, err := g.FetchMessage(ctx, accessToken, refreshToken, msg.Message.Id)
+				if err != nil {
+					continue
+				}
+				allMessages = append(allMessages, fullMsg)
+			}
+		}
+
+		if history.NextPageToken == "" {
+			break
+		}
+		pageToken = history.NextPageToken
+	}
+
+	return allMessages, latestHistoryID, nil
 }
 
 // StopWatch stops Gmail push notifications for an account

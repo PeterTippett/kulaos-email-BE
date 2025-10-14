@@ -34,6 +34,7 @@ type EmailAccount struct {
 	AccessToken       string    `datastore:"access_token,noindex"`  // Encrypted
 	RefreshToken      string    `datastore:"refresh_token,noindex"` // Encrypted
 	TokenExpiry       time.Time `datastore:"token_expiry"`
+	LastHistoryID     int64     `datastore:"last_history_id"`
 	WebhookChannelID  string    `datastore:"webhook_channel_id"`
 	WebhookExpiration time.Time `datastore:"webhook_expiration"`
 	CreatedAt         time.Time `datastore:"created_at"`
@@ -183,6 +184,28 @@ func (a *AccountStore) UpdateWebhookInfo(ctx context.Context, namespace, account
 
 	_, err = a.client.Put(ctx, key, account)
 	return err
+}
+
+// UpdateLastHistoryID updates the stored Gmail history ID used for incremental sync
+func (a *AccountStore) UpdateLastHistoryID(ctx context.Context, namespace, accountID string, historyID int64) error {
+	account, err := a.GetAccount(ctx, namespace, accountID)
+	if err != nil {
+		return err
+	}
+
+	// Only move forward
+	if historyID > account.LastHistoryID {
+		account.LastHistoryID = historyID
+		account.UpdatedAt = time.Now()
+
+		key := datastore.NameKey("EmailAccount", accountID, nil)
+		key.Namespace = namespace
+
+		if _, err := a.client.Put(ctx, key, account); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *AccountStore) GetAccountByEmail(ctx context.Context, emailAddress string) (*EmailAccountLookup, error) {

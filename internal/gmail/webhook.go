@@ -108,8 +108,15 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Fetch new messages using history API
-	messages, err := h.gmailClient.FetchNewMessages(ctx, account.AccessToken, account.RefreshToken, notification.HistoryID)
+	// Determine starting history ID
+	startHistoryID := account.LastHistoryID
+	if startHistoryID == 0 {
+		// First notification after watch; use the notification's history as starting point
+		startHistoryID = int64(notification.HistoryID)
+	}
+
+	// Fetch new messages using history API with paging
+	messages, latestHistoryID, err := h.gmailClient.FetchNewMessagesPaged(ctx, account.AccessToken, account.RefreshToken, startHistoryID)
 	if err != nil {
 		log.Printf("⚠️  Failed to fetch messages: %v (acknowledging message)", err)
 		// Acknowledge anyway to prevent retries
@@ -125,6 +132,13 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 			log.Printf("❌ Failed to store messages in BigQuery: %v", err)
 		} else {
 			log.Printf("✓ Stored %d messages in BigQuery dataset: %s", len(messages), tenant.BigQueryDataset)
+		}
+
+		// Persist the latest history ID for incremental sync
+		if latestHistoryID > 0 {
+			if err := h.accountStore.UpdateLastHistoryID(ctx, lookup.Namespace, lookup.AccountID, latestHistoryID); err != nil {
+				log.Printf("⚠️  Failed to update last history ID: %v", err)
+			}
 		}
 	}
 
