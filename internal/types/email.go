@@ -10,6 +10,7 @@ type EmailMessage struct {
 	Subject      string
 	BodyText     string
 	BodyHTML     string
+	BodyMarkdown string
 	ReceivedAt   time.Time
 	Labels       []string
 	IsRead       bool

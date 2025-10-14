@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
-	"golang.org/x/oauth2"
+	md "github.com/JohannesKaufmann/html-to-markdown"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 
@@ -29,8 +30,9 @@ type WatchResponse struct {
 
 // SetupWatch sets up Gmail push notifications
 func (g *GmailClient) SetupWatch(ctx context.Context, accessToken, refreshToken, topicName string) (*WatchResponse, error) {
-	// Build a TokenSource from the refresh token so oauth2 handles refreshing
-	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	fmt.Printf("🔄 [GMAIL] Setting up watch with TokenSource for topic: %s\n", topicName)
+	// Build a TokenSource from both tokens so oauth2 handles refreshing properly
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
@@ -58,7 +60,8 @@ func (g *GmailClient) SetupWatch(ctx context.Context, accessToken, refreshToken,
 
 // FetchMessage fetches a single message by ID
 func (g *GmailClient) FetchMessage(ctx context.Context, accessToken, refreshToken, messageID string) (*types.EmailMessage, error) {
-	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	fmt.Printf("🔄 [GMAIL] Fetching message %s with TokenSource\n", messageID)
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
@@ -74,7 +77,7 @@ func (g *GmailClient) FetchMessage(ctx context.Context, accessToken, refreshToke
 
 // ListMessages lists recent messages
 func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToken string, maxResults int64) ([]*types.EmailMessage, error) {
-	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
@@ -99,7 +102,7 @@ func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToke
 
 // FetchNewMessages fetches messages since a given history ID (legacy, single page)
 func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refreshToken string, historyID uint64) ([]*types.EmailMessage, error) {
-	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
@@ -127,7 +130,8 @@ func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refresh
 
 // FetchNewMessagesPaged fetches messages since a given history ID, following pages and returning the latest history ID seen
 func (g *GmailClient) FetchNewMessagesPaged(ctx context.Context, accessToken, refreshToken string, startHistoryID int64) ([]*types.EmailMessage, int64, error) {
-	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	fmt.Printf("🔄 [GMAIL] Fetching new messages (paged) with TokenSource from history ID: %d\n", startHistoryID)
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create gmail service: %w", err)
@@ -172,7 +176,7 @@ func (g *GmailClient) FetchNewMessagesPaged(ctx context.Context, accessToken, re
 
 // StopWatch stops Gmail push notifications for an account
 func (g *GmailClient) StopWatch(ctx context.Context, accessToken, refreshToken string) error {
-	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return fmt.Errorf("failed to create gmail service: %w", err)
@@ -215,6 +219,11 @@ func (g *GmailClient) parseMessage(msg *gmail.Message) (*types.EmailMessage, err
 
 	// Parse body
 	emailMsg.BodyText, emailMsg.BodyHTML = g.parseBody(msg.Payload)
+
+	// Convert HTML to Markdown if HTML content exists
+	if emailMsg.BodyHTML != "" {
+		emailMsg.BodyMarkdown = g.convertHTMLToMarkdown(emailMsg.BodyHTML)
+	}
 
 	// Check if read
 	emailMsg.IsRead = true
@@ -259,4 +268,31 @@ func (g *GmailClient) parseBody(payload *gmail.MessagePart) (text, html string) 
 	}
 
 	return
+}
+
+// convertHTMLToMarkdown converts HTML content to Markdown
+func (g *GmailClient) convertHTMLToMarkdown(html string) string {
+	if html == "" {
+		return ""
+	}
+
+	options := &md.Options{
+		HeadingStyle:       "atx",
+		BulletListMarker:   "-",
+		CodeBlockStyle:     "fenced",
+		Fence:              "```",
+		EmDelimiter:        "*",
+		StrongDelimiter:    "**",
+		LinkStyle:          "inlined",
+		LinkReferenceStyle: "full",
+	}
+	converter := md.NewConverter("", true, options)
+
+	markdown, err := converter.ConvertString(html)
+	if err != nil {
+		// Fallback to plain text if Markdown conversion fails
+		return strings.TrimSpace(html)
+	}
+
+	return strings.TrimSpace(markdown)
 }

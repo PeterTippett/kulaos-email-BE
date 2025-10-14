@@ -1,14 +1,23 @@
 package gmail
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
+	"time"
+
+	md "github.com/JohannesKaufmann/html-to-markdown"
+	"google.golang.org/api/gmail/v1"
+	"google.golang.org/api/option"
 
 	"github.com/yourusername/email-service/internal/datastore"
 	"github.com/yourusername/email-service/internal/storage"
+	"github.com/yourusername/email-service/internal/types"
 )
 
 type WebhookHandler struct {
@@ -108,6 +117,13 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Log current token state for debugging
+	fmt.Printf("🔍 [WEBHOOK] Current token state for %s:\n", account.EmailAddress)
+	fmt.Printf("🔍 [WEBHOOK] - Access token length: %d\n", len(account.AccessToken))
+	fmt.Printf("🔍 [WEBHOOK] - Refresh token length: %d\n", len(account.RefreshToken))
+	fmt.Printf("🔍 [WEBHOOK] - Token expiry: %v\n", account.TokenExpiry)
+	fmt.Printf("🔍 [WEBHOOK] - Is token expired: %v\n", h.gmailClient.oauth.IsTokenExpired(account.TokenExpiry))
+
 	// Determine starting history ID
 	startHistoryID := account.LastHistoryID
 	if startHistoryID == 0 {
@@ -116,15 +132,92 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Fetch new messages using history API with paging
-	messages, latestHistoryID, err := h.gmailClient.FetchNewMessagesPaged(ctx, account.AccessToken, account.RefreshToken, startHistoryID)
+	// Use callback to update tokens if they get refreshed
+	tokenUpdated := false
+	var newAccessToken, newRefreshToken string
+	var newExpiry time.Time
+
+	callback := func(accessToken, refreshToken string, expiry time.Time) {
+		fmt.Printf("🔄 [WEBHOOK] Token refresh callback triggered for account %s\n", account.EmailAddress)
+		fmt.Printf("🔄 [WEBHOOK] New token expiry: %v\n", expiry)
+		tokenUpdated = true
+		newAccessToken = accessToken
+		newRefreshToken = refreshToken
+		newExpiry = expiry
+	}
+
+	// Create a client with token refresh callback
+	ts := h.gmailClient.oauth.GetTokenSourceWithCallback(ctx, account.AccessToken, account.RefreshToken, callback)
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
-		log.Printf("⚠️  Failed to fetch messages: %v (acknowledging message)", err)
-		// Acknowledge anyway to prevent retries
+		log.Printf("⚠️  Failed to create gmail service: %v (acknowledging message)", err)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	// Fetch messages using the service
+	messages, latestHistoryID, err := h.fetchMessagesWithService(ctx, gmailService, account, startHistoryID)
+	if err != nil {
+		fmt.Printf("❌ [WEBHOOK] Failed to fetch messages: %v\n", err)
+
+		// If it's an authentication error, try to manually refresh the token
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "invalid authentication") {
+			fmt.Printf("🔄 [WEBHOOK] Authentication error detected, attempting manual token refresh\n")
+
+			newToken, refreshErr := h.gmailClient.oauth.RefreshTokenWithRetry(ctx, account.RefreshToken, 3)
+			if refreshErr != nil {
+				fmt.Printf("❌ [WEBHOOK] Manual token refresh failed: %v\n", refreshErr)
+				log.Printf("⚠️  Failed to fetch messages and manual refresh failed: %v (acknowledging message)", err)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			fmt.Printf("✅ [WEBHOOK] Manual token refresh successful, updating database\n")
+			// Update tokens in database
+			if updateErr := h.accountStore.UpdateTokens(ctx, lookup.Namespace, lookup.OrgID, lookup.AccountID, newToken.AccessToken, newToken.RefreshToken, newToken.Expiry); updateErr != nil {
+				fmt.Printf("❌ [WEBHOOK] Failed to update manually refreshed tokens: %v\n", updateErr)
+			}
+
+			// Try fetching messages again with the new token
+			fmt.Printf("🔄 [WEBHOOK] Retrying message fetch with refreshed token\n")
+			newTS := h.gmailClient.oauth.GetTokenSource(ctx, newToken.AccessToken, newToken.RefreshToken)
+			newGmailService, serviceErr := gmail.NewService(ctx, option.WithTokenSource(newTS))
+			if serviceErr != nil {
+				fmt.Printf("❌ [WEBHOOK] Failed to create new gmail service: %v\n", serviceErr)
+				log.Printf("⚠️  Failed to create new gmail service: %v (acknowledging message)", serviceErr)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			messages, latestHistoryID, err = h.fetchMessagesWithService(ctx, newGmailService, account, startHistoryID)
+			if err != nil {
+				fmt.Printf("❌ [WEBHOOK] Retry with refreshed token also failed: %v\n", err)
+				log.Printf("⚠️  Failed to fetch messages even after token refresh: %v (acknowledging message)", err)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			fmt.Printf("✅ [WEBHOOK] Successfully fetched messages after manual token refresh\n")
+		} else {
+			log.Printf("⚠️  Failed to fetch messages: %v (acknowledging message)", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
 	log.Printf("✓ Fetched %d new messages", len(messages))
+
+	// Update tokens in database if they were refreshed
+	if tokenUpdated {
+		fmt.Printf("✅ [WEBHOOK] Tokens were refreshed, updating database for account %s\n", account.EmailAddress)
+		log.Printf("✓ Tokens were refreshed, updating database")
+		if err := h.accountStore.UpdateTokens(ctx, lookup.Namespace, lookup.OrgID, lookup.AccountID, newAccessToken, newRefreshToken, newExpiry); err != nil {
+			fmt.Printf("❌ [WEBHOOK] Failed to update refreshed tokens in database: %v\n", err)
+			log.Printf("⚠️  Failed to update refreshed tokens: %v", err)
+		} else {
+			fmt.Printf("✅ [WEBHOOK] Successfully updated refreshed tokens in database\n")
+		}
+	}
 
 	// Store messages in tenant's BigQuery dataset
 	if len(messages) > 0 {
@@ -143,4 +236,158 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// fetchMessagesWithService fetches messages using a Gmail service instance
+func (h *WebhookHandler) fetchMessagesWithService(ctx context.Context, gmailService *gmail.Service, account *datastore.EmailAccount, startHistoryID int64) ([]*types.EmailMessage, int64, error) {
+	var allMessages []*types.EmailMessage
+	var pageToken string
+	var latestHistoryID int64 = startHistoryID
+
+	for {
+		call := gmailService.Users.History.List("me").StartHistoryId(uint64(latestHistoryID))
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		history, err := call.Do()
+		if err != nil {
+			return nil, latestHistoryID, fmt.Errorf("failed to fetch history: %w", err)
+		}
+
+		for _, hist := range history.History {
+			if int64(hist.Id) > latestHistoryID {
+				latestHistoryID = int64(hist.Id)
+			}
+			for _, msg := range hist.MessagesAdded {
+				fullMsg, err := gmailService.Users.Messages.Get("me", msg.Message.Id).Format("full").Do()
+				if err != nil {
+					continue
+				}
+
+				// Parse the message
+				emailMsg, err := h.parseMessage(fullMsg)
+				if err != nil {
+					continue
+				}
+				allMessages = append(allMessages, emailMsg)
+			}
+		}
+
+		if history.NextPageToken == "" {
+			break
+		}
+		pageToken = history.NextPageToken
+	}
+
+	return allMessages, latestHistoryID, nil
+}
+
+// parseMessage parses a Gmail message into our EmailMessage type
+func (h *WebhookHandler) parseMessage(msg *gmail.Message) (*types.EmailMessage, error) {
+	emailMsg := &types.EmailMessage{
+		MessageID:    msg.Id,
+		ThreadID:     msg.ThreadId,
+		Labels:       msg.LabelIds,
+		InternalDate: msg.InternalDate,
+	}
+
+	// Parse headers
+	for _, header := range msg.Payload.Headers {
+		switch header.Name {
+		case "From":
+			emailMsg.Sender = header.Value
+		case "Subject":
+			emailMsg.Subject = header.Value
+		case "Date":
+			if t, err := time.Parse(time.RFC1123Z, header.Value); err == nil {
+				emailMsg.ReceivedAt = t
+			}
+		}
+	}
+
+	// If ReceivedAt is not set from Date header, use InternalDate
+	if emailMsg.ReceivedAt.IsZero() {
+		emailMsg.ReceivedAt = time.Unix(0, msg.InternalDate*int64(time.Millisecond))
+	}
+
+	// Parse body
+	emailMsg.BodyText, emailMsg.BodyHTML = h.parseBody(msg.Payload)
+
+	// Convert HTML to Markdown if HTML content exists
+	if emailMsg.BodyHTML != "" {
+		emailMsg.BodyMarkdown = h.convertHTMLToMarkdown(emailMsg.BodyHTML)
+	}
+
+	// Check if read
+	emailMsg.IsRead = true
+	for _, label := range msg.LabelIds {
+		if label == "UNREAD" {
+			emailMsg.IsRead = false
+			break
+		}
+	}
+
+	return emailMsg, nil
+}
+
+// parseBody extracts text and HTML content from message payload
+func (h *WebhookHandler) parseBody(payload *gmail.MessagePart) (text, html string) {
+	if payload.Body != nil && payload.Body.Data != "" {
+		decoded, _ := base64.URLEncoding.DecodeString(payload.Body.Data)
+		if payload.MimeType == "text/plain" {
+			text = string(decoded)
+		} else if payload.MimeType == "text/html" {
+			html = string(decoded)
+		}
+	}
+
+	for _, part := range payload.Parts {
+		if part.MimeType == "text/plain" && part.Body != nil && part.Body.Data != "" {
+			decoded, _ := base64.URLEncoding.DecodeString(part.Body.Data)
+			text = string(decoded)
+		} else if part.MimeType == "text/html" && part.Body != nil && part.Body.Data != "" {
+			decoded, _ := base64.URLEncoding.DecodeString(part.Body.Data)
+			html = string(decoded)
+		}
+
+		if len(part.Parts) > 0 {
+			t, h := h.parseBody(part)
+			if text == "" {
+				text = t
+			}
+			if html == "" {
+				html = h
+			}
+		}
+	}
+
+	return
+}
+
+// convertHTMLToMarkdown converts HTML content to Markdown
+func (h *WebhookHandler) convertHTMLToMarkdown(html string) string {
+	if html == "" {
+		return ""
+	}
+
+	options := &md.Options{
+		HeadingStyle:       "atx",
+		BulletListMarker:   "-",
+		CodeBlockStyle:     "fenced",
+		Fence:              "```",
+		EmDelimiter:        "*",
+		StrongDelimiter:    "**",
+		LinkStyle:          "inlined",
+		LinkReferenceStyle: "full",
+	}
+	converter := md.NewConverter("", true, options)
+
+	markdown, err := converter.ConvertString(html)
+	if err != nil {
+		// Fallback to plain text if Markdown conversion fails
+		return strings.TrimSpace(html)
+	}
+
+	return strings.TrimSpace(markdown)
 }

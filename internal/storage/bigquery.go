@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
-	html2text "github.com/k3a/html2text"
+
 	"github.com/yourusername/email-service/internal/types"
 )
 
@@ -28,17 +28,18 @@ func NewBigQueryStore(ctx context.Context, projectID, location string) (*BigQuer
 }
 
 type EmailRecord struct {
-	MessageID      string    `bigquery:"message_id"`
-	ThreadID       string    `bigquery:"thread_id"`
-	AccountID      string    `bigquery:"account_id"`
-	Sender         string    `bigquery:"sender"`
-	Subject        string    `bigquery:"subject"`
-	BodyText       string    `bigquery:"body_text"`
-	ParsedBodyHTML string    `bigquery:"parsed_body_html"`
-	ReceivedAt     time.Time `bigquery:"received_at"`
-	IngestedAt     time.Time `bigquery:"ingested_at"`
-	IsRead         bool      `bigquery:"is_read"`
-	Labels         []string  `bigquery:"labels"`
+	MessageID    string    `bigquery:"message_id"`
+	ThreadID     string    `bigquery:"thread_id"`
+	AccountID    string    `bigquery:"account_id"`
+	Sender       string    `bigquery:"sender"`
+	Subject      string    `bigquery:"subject"`
+	BodyText     string    `bigquery:"body_text"`
+	BodyHTML     string    `bigquery:"body_html"`
+	BodyMarkdown string    `bigquery:"body_markdown"`
+	ReceivedAt   time.Time `bigquery:"received_at"`
+	IngestedAt   time.Time `bigquery:"ingested_at"`
+	IsRead       bool      `bigquery:"is_read"`
+	Labels       []string  `bigquery:"labels"`
 }
 
 // CreateTenantDataset creates a BigQuery dataset for a tenant if it doesn't exist
@@ -72,21 +73,39 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 	// Check if table exists
 	md, err := table.Metadata(ctx)
 	if err == nil {
-		// Table already exists - ensure parsed_body_html exists
-		hasParsed := false
+		// Table already exists - check if it needs schema updates
+		hasBodyHTML := false
+		hasBodyMarkdown := false
 		for _, f := range md.Schema {
-			if f.Name == "parsed_body_html" {
-				hasParsed = true
+			if f.Name == "body_html" {
+				hasBodyHTML = true
+			}
+			if f.Name == "body_markdown" {
+				hasBodyMarkdown = true
 			}
 		}
 
-		if !hasParsed {
-			// Add parsed_body_html as a NULLABLE STRING column
-			newSchema := append(md.Schema, &bigquery.FieldSchema{
-				Name:     "parsed_body_html",
-				Type:     bigquery.StringFieldType,
-				Required: false,
-			})
+		// Add missing fields if needed
+		var newSchema bigquery.Schema
+		if !hasBodyHTML || !hasBodyMarkdown {
+			newSchema = make(bigquery.Schema, len(md.Schema))
+			copy(newSchema, md.Schema)
+
+			if !hasBodyHTML {
+				newSchema = append(newSchema, &bigquery.FieldSchema{
+					Name:     "body_html",
+					Type:     bigquery.StringFieldType,
+					Required: false,
+				})
+			}
+			if !hasBodyMarkdown {
+				newSchema = append(newSchema, &bigquery.FieldSchema{
+					Name:     "body_markdown",
+					Type:     bigquery.StringFieldType,
+					Required: false,
+				})
+			}
+
 			update := bigquery.TableMetadataToUpdate{
 				Schema: newSchema,
 			}
@@ -134,24 +153,19 @@ func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, 
 	// Convert to BigQuery records
 	records := make([]*EmailRecord, len(messages))
 	for i, msg := range messages {
-		// Derive parsed_body_html from HTML body if present
-		var parsedFromHTML string
-		if msg.BodyHTML != "" {
-			parsedFromHTML = html2text.HTML2Text(msg.BodyHTML)
-		}
-
 		records[i] = &EmailRecord{
-			MessageID:      msg.MessageID,
-			ThreadID:       msg.ThreadID,
-			AccountID:      accountID,
-			Sender:         msg.Sender,
-			Subject:        msg.Subject,
-			BodyText:       msg.BodyText,
-			ParsedBodyHTML: parsedFromHTML,
-			ReceivedAt:     msg.ReceivedAt,
-			IngestedAt:     time.Now(),
-			IsRead:         msg.IsRead,
-			Labels:         msg.Labels,
+			MessageID:    msg.MessageID,
+			ThreadID:     msg.ThreadID,
+			AccountID:    accountID,
+			Sender:       msg.Sender,
+			Subject:      msg.Subject,
+			BodyText:     msg.BodyText,
+			BodyHTML:     msg.BodyHTML,
+			BodyMarkdown: msg.BodyMarkdown,
+			ReceivedAt:   msg.ReceivedAt,
+			IngestedAt:   time.Now(),
+			IsRead:       msg.IsRead,
+			Labels:       msg.Labels,
 		}
 	}
 
@@ -174,7 +188,8 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 			sender,
 			subject,
 			body_text,
-      parsed_body_html,
+			body_html,
+			body_markdown,
 			received_at,
 			ingested_at,
 			is_read,

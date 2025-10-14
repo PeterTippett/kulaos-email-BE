@@ -6,9 +6,9 @@ require (
 	cloud.google.com/go/bigquery v1.59.1
 	cloud.google.com/go/datastore v1.15.0
 	cloud.google.com/go/kms v1.15.7
+	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
-	github.com/k3a/html2text v1.2.1
 	golang.org/x/oauth2 v0.16.0
 	google.golang.org/api v0.162.0
 	google.golang.org/protobuf v1.32.0
@@ -19,6 +19,8 @@ require (
 	cloud.google.com/go/compute v1.23.3 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
 	cloud.google.com/go/iam v1.1.6 // indirect
+	github.com/PuerkitoBio/goquery v1.9.2 // indirect
+	github.com/andybalholm/cascadia v1.3.2 // indirect
 	github.com/apache/arrow/go/v14 v14.0.2 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
@@ -40,12 +42,12 @@ require (
 	go.opentelemetry.io/otel v1.22.0 // indirect
 	go.opentelemetry.io/otel/metric v1.22.0 // indirect
 	go.opentelemetry.io/otel/trace v1.22.0 // indirect
-	golang.org/x/crypto v0.18.0 // indirect
+	golang.org/x/crypto v0.23.0 // indirect
 	golang.org/x/mod v0.13.0 // indirect
-	golang.org/x/net v0.20.0 // indirect
+	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
-	golang.org/x/sys v0.16.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/sys v0.20.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/tools v0.14.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
