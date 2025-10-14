@@ -99,9 +99,11 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract org ID from state
-	var orgID string
-	fmt.Sscanf(state, "%s:", &orgID)
+	// Extract org ID from state (format: orgID:uuid)
+	orgID := state
+	if idx := strings.Index(state, ":"); idx != -1 {
+		orgID = state[:idx]
+	}
 
 	if orgID == "" {
 		http.Error(w, "invalid state", http.StatusBadRequest)

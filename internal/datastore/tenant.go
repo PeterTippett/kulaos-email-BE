@@ -32,14 +32,17 @@ type Tenant struct {
 }
 
 func (t *TenantStore) CreateTenant(ctx context.Context, orgID string) (*Tenant, error) {
+	// Normalize key to the base org ID (before any colon suffixes)
+	baseOrgID := strings.Split(orgID, ":")[0]
+
 	// Check if tenant already exists
-	existing, err := t.GetTenant(ctx, orgID)
+	existing, err := t.GetTenant(ctx, baseOrgID)
 	if err == nil {
 		return existing, nil
 	}
 
 	// Extract the org ID part (before the colon if present)
-	namespace := strings.Split(orgID, ":")[0]
+	namespace := baseOrgID
 
 	tenant := &Tenant{
 		OrgID:           orgID,
@@ -49,7 +52,7 @@ func (t *TenantStore) CreateTenant(ctx context.Context, orgID string) (*Tenant, 
 		UpdatedAt:       time.Now(),
 	}
 
-	key := datastore.NameKey("Tenant", orgID, nil)
+	key := datastore.NameKey("Tenant", baseOrgID, nil)
 	key.Namespace = DefaultNamespace
 
 	_, err = t.client.Put(ctx, key, tenant)
@@ -61,7 +64,9 @@ func (t *TenantStore) CreateTenant(ctx context.Context, orgID string) (*Tenant, 
 }
 
 func (t *TenantStore) GetTenant(ctx context.Context, orgID string) (*Tenant, error) {
-	key := datastore.NameKey("Tenant", orgID, nil)
+	// Normalize key to the base org ID (before any colon suffixes)
+	baseOrgID := strings.Split(orgID, ":")[0]
+	key := datastore.NameKey("Tenant", baseOrgID, nil)
 	key.Namespace = DefaultNamespace
 
 	var tenant Tenant
