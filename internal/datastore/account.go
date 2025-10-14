@@ -209,6 +209,27 @@ func (a *AccountStore) createLookupEntry(ctx context.Context, emailAddress, orgI
 	return err
 }
 
+// DeleteAccount removes an account and its lookup entry
+func (a *AccountStore) DeleteAccount(ctx context.Context, namespace, accountID, emailAddress string) error {
+	// Delete account from tenant namespace
+	accountKey := datastore.NameKey("EmailAccount", accountID, nil)
+	accountKey.Namespace = namespace
+
+	if err := a.client.Delete(ctx, accountKey); err != nil {
+		return fmt.Errorf("failed to delete account: %w", err)
+	}
+
+	// Delete lookup entry from DEFAULT namespace
+	lookupKey := datastore.NameKey("EmailAccountLookup", emailAddress, nil)
+	lookupKey.Namespace = DefaultNamespace
+
+	if err := a.client.Delete(ctx, lookupKey); err != nil {
+		return fmt.Errorf("failed to delete lookup entry: %w", err)
+	}
+
+	return nil
+}
+
 func (a *AccountStore) Close() error {
 	return a.client.Close()
 }

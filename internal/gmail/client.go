@@ -28,13 +28,9 @@ type WatchResponse struct {
 
 // SetupWatch sets up Gmail push notifications
 func (g *GmailClient) SetupWatch(ctx context.Context, accessToken, refreshToken, topicName string) (*WatchResponse, error) {
-	token := &oauth2.Token{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-	}
-
-	client := g.oauth.config.Client(ctx, token)
-	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+	// Build a TokenSource from the refresh token so oauth2 handles refreshing
+	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
 	}
@@ -60,13 +56,8 @@ func (g *GmailClient) SetupWatch(ctx context.Context, accessToken, refreshToken,
 
 // FetchMessage fetches a single message by ID
 func (g *GmailClient) FetchMessage(ctx context.Context, accessToken, refreshToken, messageID string) (*types.EmailMessage, error) {
-	token := &oauth2.Token{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-	}
-
-	client := g.oauth.config.Client(ctx, token)
-	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
 	}
@@ -81,13 +72,8 @@ func (g *GmailClient) FetchMessage(ctx context.Context, accessToken, refreshToke
 
 // ListMessages lists recent messages
 func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToken string, maxResults int64) ([]*types.EmailMessage, error) {
-	token := &oauth2.Token{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-	}
-
-	client := g.oauth.config.Client(ctx, token)
-	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
 	}
@@ -111,13 +97,8 @@ func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToke
 
 // FetchNewMessages fetches messages since a given history ID
 func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refreshToken string, historyID uint64) ([]*types.EmailMessage, error) {
-	token := &oauth2.Token{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-	}
-
-	client := g.oauth.config.Client(ctx, token)
-	gmailService, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
 	}
@@ -140,6 +121,22 @@ func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refresh
 	}
 
 	return messages, nil
+}
+
+// StopWatch stops Gmail push notifications for an account
+func (g *GmailClient) StopWatch(ctx context.Context, accessToken, refreshToken string) error {
+	ts := g.oauth.config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return fmt.Errorf("failed to create gmail service: %w", err)
+	}
+
+	err = gmailService.Users.Stop("me").Do()
+	if err != nil {
+		return fmt.Errorf("failed to stop watch: %w", err)
+	}
+
+	return nil
 }
 
 func (g *GmailClient) parseMessage(msg *gmail.Message) (*types.EmailMessage, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/yourusername/email-service/internal/auth"
@@ -233,4 +234,59 @@ func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"emails": emails,
 	})
+}
+
+// DeleteAccount removes an email account and cleans up watch subscriptions
+func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgID := auth.GetOrgID(ctx)
+
+	if orgID == "" {
+		http.Error(w, "organization ID not found", http.StatusBadRequest)
+		return
+	}
+
+	// Ensure DELETE method and extract account ID from path
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Expect path like /api/accounts/{accountId}
+	const prefix = "/api/accounts/"
+	if !strings.HasPrefix(r.URL.Path, prefix) || len(r.URL.Path) <= len(prefix) {
+		http.Error(w, "account ID is required", http.StatusBadRequest)
+		return
+	}
+	accountID := strings.TrimPrefix(r.URL.Path, prefix)
+
+	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
+	if err != nil {
+		http.Error(w, "tenant not found", http.StatusNotFound)
+		return
+	}
+
+	// Get account with decrypted tokens to stop watch
+	account, err := h.accountStore.GetAccountWithDecryptedTokens(ctx, tenant.Namespace, orgID, accountID)
+	if err != nil {
+		log.Printf("Failed to get account for deletion: %v", err)
+		http.Error(w, "account not found", http.StatusNotFound)
+		return
+	}
+
+	// Stop Gmail watch subscription
+	if err := h.gmailClient.StopWatch(ctx, account.AccessToken, account.RefreshToken); err != nil {
+		log.Printf("Warning: Failed to stop watch subscription: %v", err)
+		// Continue with deletion even if stopping watch fails
+	}
+
+	// Delete account and lookup entry from datastore
+	if err := h.accountStore.DeleteAccount(ctx, tenant.Namespace, accountID, account.EmailAddress); err != nil {
+		log.Printf("Failed to delete account: %v", err)
+		http.Error(w, "failed to delete account", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Successfully deleted account %s (%s)", accountID, account.EmailAddress)
+	w.WriteHeader(http.StatusNoContent)
 }
