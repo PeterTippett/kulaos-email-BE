@@ -2,11 +2,13 @@ package auth
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+
+	golangjwt "github.com/golang-jwt/jwt/v5"
+	"github.com/kinde-oss/kinde-go/jwt"
 )
 
 type contextKey string
@@ -21,22 +23,19 @@ type KindeAuth struct {
 	domain       string
 	clientID     string
 	clientSecret string
+	jwksURL      string
 }
 
 func NewKindeAuth(domain, clientID, clientSecret string) *KindeAuth {
+	// Construct JWKS URL from domain
+	jwksURL := fmt.Sprintf("https://%s/.well-known/jwks", domain)
+
 	return &KindeAuth{
 		domain:       domain,
 		clientID:     clientID,
 		clientSecret: clientSecret,
+		jwksURL:      jwksURL,
 	}
-}
-
-// KindeClaims represents the claims we extract from Kinde JWT
-type KindeClaims struct {
-	Sub     string `json:"sub"`
-	Email   string `json:"email"`
-	OrgCode string `json:"org_code"` // Kinde uses org_code as a string
-	OrgID   string // Will be populated from org_code
 }
 
 // RequireAuth middleware that extracts and validates Kinde JWT token
@@ -48,90 +47,84 @@ func (k *KindeAuth) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if token == authHeader {
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenString == authHeader {
 			http.Error(w, "invalid authorization header format", http.StatusUnauthorized)
 			return
 		}
 
-		// In production, you'd validate the JWT signature
-		// For POC, we'll decode it without full validation
-		claims, err := k.extractClaims(token)
+		// Parse and validate token with JWKS verification
+		// Note: We validate 'azp' (authorized party) claim instead of 'aud' because
+		// Kinde may use azp when the token doesn't have a specific audience
+		parsedToken, err := jwt.ParseFromString(
+			tokenString,
+			jwt.WillValidateWithJWKSUrl(k.jwksURL),
+			jwt.WillValidateIssuer(fmt.Sprintf("https://%s", k.domain)),
+			jwt.WillValidateAlgorithm("RS256"),
+			// Custom validation for azp claim
+			jwt.WillValidateClaims(func(claims golangjwt.MapClaims) (bool, error) {
+				// Check azp (authorized party) claim
+				azp, ok := claims["azp"].(string)
+				if ok && azp == k.clientID {
+					return true, nil
+				}
+
+				// Fall back to checking aud if azp is not present
+				if aud, ok := claims["aud"].([]interface{}); ok {
+					for _, a := range aud {
+						if audStr, ok := a.(string); ok && audStr == k.clientID {
+							return true, nil
+						}
+					}
+				}
+				if audStr, ok := claims["aud"].(string); ok && audStr == k.clientID {
+					return true, nil
+				}
+
+				return false, fmt.Errorf("token must have azp or aud claim matching client ID")
+			}),
+		)
+
 		if err != nil {
+			log.Printf("⚠️  Token validation failed: %v", err)
 			http.Error(w, fmt.Sprintf("invalid token: %v", err), http.StatusUnauthorized)
 			return
 		}
 
-		if claims.OrgID == "" {
+		// If ParseFromString succeeded, the token is valid
+		// No need to check GetValidationErrors() again as it's already handled by ParseFromString
+
+		// Extract claims
+		claims := parsedToken.GetClaims()
+		if claims == nil {
+			http.Error(w, "missing token claims", http.StatusUnauthorized)
+			return
+		}
+
+		// Extract user ID (sub claim)
+		sub, ok := claims["sub"].(string)
+		if !ok || sub == "" {
+			http.Error(w, "missing sub claim", http.StatusUnauthorized)
+			return
+		}
+
+		// Extract email (may not always be present)
+		email, _ := claims["email"].(string)
+
+		// Extract organization code (org_code claim)
+		orgCode, _ := claims["org_code"].(string)
+		if orgCode == "" {
 			http.Error(w, "user must be in an organization", http.StatusForbidden)
 			return
 		}
 
 		// Attach claims to context
-		ctx := context.WithValue(r.Context(), OrgIDKey, claims.OrgID)
-		ctx = context.WithValue(ctx, UserIDKey, claims.Sub)
-		ctx = context.WithValue(ctx, UserEmailKey, claims.Email)
+		ctx := context.WithValue(r.Context(), OrgIDKey, orgCode)
+		ctx = context.WithValue(ctx, UserIDKey, sub)
+		ctx = context.WithValue(ctx, UserEmailKey, email)
 
 		next(w, r.WithContext(ctx))
 	}
-}
-
-// extractClaims extracts claims from JWT token
-// Note: This is a simplified version for POC. In production, use a proper JWT library
-// and validate the signature against Kinde's JWKS endpoint
-func (k *KindeAuth) extractClaims(token string) (*KindeClaims, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid token format")
-	}
-
-	// Decode payload (middle part)
-	payload := parts[1]
-
-	// Try URL-safe base64 decoding with padding first
-	var decoded []byte
-	var err error
-
-	// Add padding if needed
-	if l := len(payload) % 4; l > 0 {
-		payload += strings.Repeat("=", 4-l)
-	}
-
-	// Try URL-safe encoding first (standard for JWTs)
-	decoded, err = base64.URLEncoding.DecodeString(payload)
-	if err != nil {
-		// If that fails, try RawURLEncoding
-		payload = parts[1] // reset payload without padding
-		decoded, err = base64.RawURLEncoding.DecodeString(payload)
-		if err != nil {
-			// If that also fails, try standard base64
-			payload = parts[1]
-			if l := len(payload) % 4; l > 0 {
-				payload += strings.Repeat("=", 4-l)
-			}
-			decoded, err = base64.StdEncoding.DecodeString(payload)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode token with all methods: %w", err)
-			}
-		}
-	}
-
-	var claims KindeClaims
-	if err := json.Unmarshal(decoded, &claims); err != nil {
-		return nil, fmt.Errorf("failed to parse claims: %w", err)
-	}
-
-	// Set OrgID from org_code
-	claims.OrgID = claims.OrgCode
-
-	return &claims, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // GetOrgID extracts the organization ID from the request context

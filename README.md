@@ -17,8 +17,8 @@ This backend service provides a complete email processing pipeline that:
 
 ### Technology Stack
 
-- **Language**: Go 1.21+
-- **Authentication**: Kinde (JWT-based)
+- **Language**: Go 1.24+
+- **Authentication**: Kinde (JWT-based with JWKS signature verification)
 - **Storage**:
   - Google Cloud Datastore (account metadata, tenant-namespaced)
   - Google Cloud BigQuery (email data, per-tenant datasets)
@@ -37,6 +37,34 @@ This backend service provides a complete email processing pipeline that:
 7. **Webhook Processing**: Backend receives webhook, decrypts tokens, fetches email
 8. **Storage**: Email stored in tenant-specific BigQuery dataset
 
+### Authentication Implementation
+
+The backend uses the official [Kinde Go SDK](https://github.com/kinde-oss/kinde-go) for robust JWT authentication:
+
+**Token Validation Process:**
+
+1. **JWT Parsing**: Uses Kinde SDK's JWT package to parse incoming tokens
+2. **Signature Verification**: Validates token signature against Kinde's JWKS endpoint
+3. **Claims Validation**:
+   - Verifies token issuer matches Kinde domain
+   - Validates audience matches client ID
+   - Checks token expiration with clock skew tolerance
+   - Confirms RS256 signing algorithm
+4. **Organization Check**: Ensures user has `org_code` claim (required for multi-tenancy)
+5. **Context Attachment**: Attaches user ID, email, and org ID to request context
+
+**Configuration:**
+
+```go
+jwt.ParseFromString(
+    tokenString,
+    jwt.WillValidateWithJWKSUrl(jwksURL),              // JWKS validation
+    jwt.WillValidateIssuer("https://your.kinde.com"),   // Issuer check
+    jwt.WillValidateAudience(clientID),                 // Audience check
+    jwt.WillValidateAlgorithm("RS256"),                 // Algorithm check
+)
+```
+
 ### Multi-Tenancy Model
 
 **Tenant Isolation Strategy:**
@@ -49,6 +77,8 @@ This backend service provides a complete email processing pipeline that:
 **Security Features:**
 
 - All OAuth tokens encrypted at rest using KMS
+- JWT signature verification using Kinde's JWKS (JSON Web Key Set)
+- Token validation includes signature, expiration, audience, and issuer checks
 - Tenant data cannot cross namespace boundaries
 - JWT validation ensures users only access their organization's data
 - No shared storage between tenants
@@ -75,15 +105,42 @@ This backend service provides a complete email processing pipeline that:
 
 ### Required Tools
 
-- **Go**: Version 1.21 or higher
+- **Go**: Version 1.24 or higher
 - **Google Cloud SDK**: For `gcloud` CLI commands
 - **ngrok** (for local development): To expose webhook endpoint
 
 ## Installation
 
-### 1. Google Cloud Platform Setup
+### Automated Setup (Recommended)
 
-#### Enable Required APIs
+We provide an automated setup script that handles most of the infrastructure provisioning:
+
+```bash
+cd backend
+./setup.sh
+```
+
+The script will:
+
+- ✅ Check for required tools (Go, gcloud)
+- ✅ Verify GCP authentication and project configuration
+- ✅ Create .env file from template
+- ✅ Enable required GCP APIs
+- ✅ Create KMS keyring for encryption
+- ✅ Create Pub/Sub topic for Gmail notifications
+- ✅ Optionally create push subscription with your webhook URL
+- ✅ Install Go dependencies
+- ✅ Provide a summary of what was created
+
+After running the script, follow the "Next Steps" displayed to complete your configuration.
+
+### Manual Setup (Alternative)
+
+If you prefer to set up infrastructure manually:
+
+#### 1. Google Cloud Platform Setup
+
+**Enable Required APIs:**
 
 ```bash
 gcloud services enable datastore.googleapis.com
@@ -93,7 +150,7 @@ gcloud services enable pubsub.googleapis.com
 gcloud services enable gmail.googleapis.com
 ```
 
-#### Create KMS Keyring
+**Create KMS Keyring:**
 
 ```bash
 gcloud kms keyrings create email-service-keyring --location=global
@@ -527,13 +584,39 @@ bq query --use_legacy_sql=false 'SELECT * FROM `tenant_YOUR_ORG_ID_emails.emails
 
 ### Server Won't Start
 
-**Problem**: Error loading configuration
+**Problem**: Configuration validation failed
+
+The backend now validates all configuration on startup. You may see errors like:
+
+```
+configuration validation failed:
+  - PROJECT_ID: is required but not set
+  - KINDE_DOMAIN: should not include protocol (e.g., 'your-tenant.kinde.com', not 'https://your-tenant.kinde.com')
+  - GMAIL_REDIRECT_URI: 'invalid-url' is not a valid URL
+```
 
 **Solution**:
 
-- Verify `.env` file exists and is properly formatted
-- Check all required environment variables are set
-- Ensure service account key file exists at specified path
+1. Check your `.env` file contains all required variables:
+
+   - `PROJECT_ID`, `KMS_KEYRING`, `PUBSUB_TOPIC`
+   - `KINDE_DOMAIN`, `KINDE_CLIENT_ID`, `KINDE_CLIENT_SECRET`, `KINDE_REDIRECT_URI`
+   - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI`
+   - `FRONTEND_BASE_URL`
+
+2. Verify values are properly formatted:
+
+   - URLs must include protocol (`http://` or `https://`)
+   - Kinde domain should NOT include protocol
+   - GCP project ID must be lowercase with hyphens
+   - Port numbers must be 1-65535
+
+3. Replace any placeholder values:
+
+   - Look for `your-tenant`, `your-project-id`, etc.
+   - These must be replaced with actual values
+
+4. Check for extra quotes or whitespace around values
 
 **Problem**: GCP authentication fails
 
@@ -558,6 +641,46 @@ bq query --use_legacy_sql=false 'SELECT * FROM `tenant_YOUR_ORG_ID_emails.emails
 
 - Verify `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` are correct
 - Ensure Gmail API is enabled in GCP project
+
+### Authentication Issues
+
+**Problem**: JWT token validation failed
+
+Errors like `invalid token: token signature is invalid` or `token validation failed`
+
+**Solution**:
+
+1. **Check Kinde Configuration**:
+
+   - Ensure `KINDE_DOMAIN` is correct (e.g., `your-tenant.kinde.com`)
+   - Verify `KINDE_CLIENT_ID` matches your Kinde application
+   - Check that JWKS is accessible at `https://YOUR_DOMAIN/.well-known/jwks`
+
+2. **Verify Token Claims**:
+
+   - User must be assigned to a Kinde organization
+   - Token must include `org_code` claim
+   - Token audience (`aud`) must match client ID
+
+3. **Check Token Expiration**:
+
+   - Tokens expire after a set time (usually 1 hour)
+   - Frontend should refresh tokens before expiration
+   - Backend allows 30 seconds clock skew tolerance
+
+4. **Test JWT Manually**:
+   ```bash
+   # Decode JWT to inspect claims
+   echo "YOUR_JWT_TOKEN" | cut -d'.' -f2 | base64 -d | jq
+   ```
+
+**Problem**: User must be in an organization
+
+**Solution**:
+
+- In Kinde dashboard, ensure users are assigned to an organization
+- Check that organization is active
+- Verify organization has `org_code` set
 
 ### Webhooks Not Working
 
@@ -636,11 +759,11 @@ For production deployments:
 - [ ] Use HTTPS for all endpoints (remove ngrok, use Cloud Run/App Engine)
 - [ ] Implement proper CORS policies
 - [ ] Add rate limiting per tenant
-- [ ] Implement JWKS validation for Kinde tokens
+- [x] ~~Implement JWKS validation for Kinde tokens~~ (✅ Implemented with Kinde SDK)
 - [ ] Use secret manager for credentials (not .env files)
 - [ ] Enable audit logging
 - [ ] Set up monitoring and alerting
-- [ ] Implement OAuth token refresh
+- [x] ~~Implement OAuth token refresh~~ (✅ Implemented with automatic refresh)
 - [ ] Add webhook signature verification
 - [ ] Configure VPC and firewall rules
 - [ ] Use least-privilege IAM roles
