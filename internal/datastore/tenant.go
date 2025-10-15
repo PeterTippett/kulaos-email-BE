@@ -100,5 +100,5 @@ func sanitizeDatasetName(orgID string) string {
 	name := strings.ReplaceAll(orgPart, "-", "_")
 	name = strings.ReplaceAll(name, ":", "_")
 	name = strings.ToLower(name)
-	return fmt.Sprintf("%s_emails", name)
+	return name
 }
