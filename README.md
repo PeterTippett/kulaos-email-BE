@@ -306,6 +306,21 @@ gcloud pubsub subscriptions create gmail-notifications-sub \
 
 **Note**: Update this URL each time you restart ngrok (unless using a paid account with fixed domain)
 
+### Gmail Watch Subscription Refresh
+
+Gmail watch subscriptions expire every 7 days. To automate renewal, set up Cloud Scheduler after deploying to production:
+
+```bash
+cd infrastructure/gcloud
+# Edit setup-cloud-scheduler.sh with your configuration
+./setup-cloud-scheduler.sh
+```
+
+For detailed setup instructions, see:
+
+- **[infrastructure/QUICK_SETUP.md](infrastructure/QUICK_SETUP.md)** - 5-minute setup guide
+- **[infrastructure/ARCHITECTURE.md](infrastructure/ARCHITECTURE.md)** - Architecture diagrams
+
 ## API Endpoints
 
 ### Authentication
@@ -764,6 +779,7 @@ For production deployments:
 - [ ] Enable audit logging
 - [ ] Set up monitoring and alerting
 - [x] ~~Implement OAuth token refresh~~ (✅ Implemented with automatic refresh)
+- [x] ~~Auto-renew Gmail watch subscriptions~~ (✅ Implemented with Cloud Scheduler)
 - [ ] Add webhook signature verification
 - [ ] Configure VPC and firewall rules
 - [ ] Use least-privilege IAM roles
@@ -807,12 +823,30 @@ gcloud pubsub subscriptions update gmail-notifications-sub \
   --push-endpoint=https://your-cloud-run-url.run.app/webhooks/gmail
 ```
 
+## Features
+
+### Implemented ✅
+
+- **Configuration management** with environment variables and validation
+- **KMS encryption** for OAuth tokens (per-tenant keys)
+- **Kinde JWT authentication** middleware with JWKS signature verification
+- **Multi-tenant data isolation** using Datastore namespaces
+- **Gmail OAuth flow** with token encryption
+- **Gmail API integration** for message fetching
+- **Gmail push notification** webhook handler
+- **BigQuery storage** with per-tenant datasets
+- **Automatic dataset and table creation**
+- **Account and email listing APIs**
+- **Automated Gmail watch subscription refresh** (Cloud Scheduler)
+- **Cloud Scheduler authentication middleware**
+- **OAuth token refresh** with automatic retry logic
+
 ## Next Steps
 
 This is a proof-of-concept implementation. For production:
 
-1. **Implement OAuth Token Refresh**: Auto-refresh expired tokens
-2. **Add Watch Renewal**: Auto-renew Gmail watch registrations (7-day expiry)
+1. ✅ ~~**Implement OAuth Token Refresh**: Auto-refresh expired tokens~~ **IMPLEMENTED**
+2. ✅ ~~**Add Watch Renewal**: Auto-renew Gmail watch registrations (7-day expiry)~~ **IMPLEMENTED**
 3. **Comprehensive Testing**: Unit tests, integration tests, load tests
 4. **Monitoring & Logging**: Structured logging, metrics, traces, alerts
 5. **Error Handling**: Retries, circuit breakers, graceful degradation

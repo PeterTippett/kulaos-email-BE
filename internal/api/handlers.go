@@ -357,3 +357,124 @@ func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		zap.String("email", account.EmailAddress))
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// RefreshWatchSubscriptions checks for expiring Gmail watch subscriptions and renews them
+// This endpoint is designed to be called by Cloud Scheduler on a regular basis (e.g., daily)
+func (h *Handlers) RefreshWatchSubscriptions(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	log := logger.FromContext(ctx)
+	log.Info("🔄 Starting watch subscription refresh job")
+
+	// Get all active accounts to check for expiring watches
+	// We check all accounts rather than just expiring ones to handle cases where
+	// webhook_expiration might be null or incorrectly set
+	accounts, err := h.accountStore.GetAllActiveAccounts(ctx)
+	if err != nil {
+		log.Error("Failed to get active accounts", zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Info("Found active accounts to check", zap.Int("count", len(accounts)))
+
+	// Filter for accounts that need watch refresh
+	// Refresh if: expiration is within 2 days OR expiration is null/not set
+	refreshThreshold := time.Now().Add(48 * time.Hour)
+	var accountsToRefresh []*datastore.EmailAccount
+
+	for _, account := range accounts {
+		needsRefresh := false
+		if account.WebhookExpiration == nil {
+			log.Info("Account has no webhook expiration set, will refresh",
+				zap.String("email", account.EmailAddress),
+				zap.String("account_id", account.AccountID))
+			needsRefresh = true
+		} else if account.WebhookExpiration.Before(refreshThreshold) {
+			log.Info("Account webhook expiring soon, will refresh",
+				zap.String("email", account.EmailAddress),
+				zap.String("account_id", account.AccountID),
+				zap.Time("expiration", *account.WebhookExpiration))
+			needsRefresh = true
+		}
+
+		if needsRefresh {
+			accountsToRefresh = append(accountsToRefresh, account)
+		}
+	}
+
+	log.Info("Accounts needing watch refresh", zap.Int("count", len(accountsToRefresh)))
+
+	refreshedCount := 0
+	failedCount := 0
+	var refreshErrors []string
+
+	// Refresh watches for each account
+	for _, account := range accountsToRefresh {
+		if err := h.refreshAccountWatch(ctx, account); err != nil {
+			log.Error("Failed to refresh watch for account",
+				zap.String("email", account.EmailAddress),
+				zap.String("account_id", account.AccountID),
+				zap.Error(err))
+			failedCount++
+			refreshErrors = append(refreshErrors, fmt.Sprintf("%s: %v", account.EmailAddress, err))
+		} else {
+			log.Info("Successfully refreshed watch for account",
+				zap.String("email", account.EmailAddress),
+				zap.String("account_id", account.AccountID))
+			refreshedCount++
+		}
+	}
+
+	// Return summary
+	response := map[string]interface{}{
+		"total_accounts":      len(accounts),
+		"accounts_to_refresh": len(accountsToRefresh),
+		"refreshed":           refreshedCount,
+		"failed":              failedCount,
+	}
+
+	if len(refreshErrors) > 0 {
+		response["errors"] = refreshErrors
+	}
+
+	log.Info("Watch subscription refresh job completed",
+		zap.Int("total", len(accounts)),
+		zap.Int("to_refresh", len(accountsToRefresh)),
+		zap.Int("refreshed", refreshedCount),
+		zap.Int("failed", failedCount))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// refreshAccountWatch refreshes the Gmail watch subscription for a single account
+func (h *Handlers) refreshAccountWatch(ctx context.Context, account *datastore.EmailAccount) error {
+	// Get tenant info to find namespace
+	tenant, err := h.tenantStore.GetTenant(ctx, account.OrgID)
+	if err != nil {
+		return fmt.Errorf("failed to get tenant: %w", err)
+	}
+
+	// Get account with decrypted tokens
+	decryptedAccount, err := h.accountStore.GetAccountWithDecryptedTokens(ctx, tenant.Namespace, account.OrgID, account.AccountID)
+	if err != nil {
+		return fmt.Errorf("failed to get decrypted tokens: %w", err)
+	}
+
+	// Setup new watch
+	topicName := fmt.Sprintf("projects/%s/topics/%s", h.projectID, h.pubsubTopic)
+	watchResp, err := h.gmailClient.SetupWatch(ctx, decryptedAccount.AccessToken, decryptedAccount.RefreshToken, topicName)
+	if err != nil {
+		return fmt.Errorf("failed to setup watch: %w", err)
+	}
+
+	// Update account with new webhook info
+	if err := h.accountStore.UpdateWebhookInfo(ctx, tenant.Namespace, account.AccountID, watchResp.ChannelID, watchResp.Expiration); err != nil {
+		return fmt.Errorf("failed to update webhook info: %w", err)
+	}
+
+	fmt.Printf("✅ Refreshed watch for %s - new expiration: %v\n", account.EmailAddress, watchResp.Expiration)
+	return nil
+}

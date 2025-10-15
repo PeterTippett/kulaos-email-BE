@@ -286,6 +286,80 @@ func (a *AccountStore) DisconnectAccount(ctx context.Context, namespace, account
 	return err
 }
 
+// GetAccountsWithExpiringWatches returns all active accounts whose watch subscriptions
+// will expire within the specified duration
+func (a *AccountStore) GetAccountsWithExpiringWatches(ctx context.Context, expiresWithin time.Duration) ([]*EmailAccount, error) {
+	expirationThreshold := time.Now().Add(expiresWithin)
+
+	// Query across all namespaces for accounts with expiring watches
+	// We need to query all possible namespaces, so we'll use a composite query
+	var accounts []*EmailAccount
+
+	// Get all tenants to know which namespaces to query
+	tenantsQuery := datastore.NewQuery("Tenant").Namespace(DefaultNamespace)
+	var tenants []struct {
+		Namespace string `datastore:"namespace"`
+	}
+
+	if _, err := a.client.GetAll(ctx, tenantsQuery, &tenants); err != nil {
+		return nil, fmt.Errorf("failed to get tenants: %w", err)
+	}
+
+	// Query each namespace for accounts with expiring watches
+	for _, tenant := range tenants {
+		query := datastore.NewQuery("EmailAccount").
+			Namespace(tenant.Namespace).
+			FilterField("status", "=", "active").
+			FilterField("webhook_expiration", "<=", expirationThreshold).
+			FilterField("webhook_expiration", ">", time.Time{}) // Ensure webhook_expiration is set
+
+		var namespaceAccounts []*EmailAccount
+		if _, err := a.client.GetAll(ctx, query, &namespaceAccounts); err != nil {
+			// Log but continue with other namespaces
+			fmt.Printf("⚠️  Failed to query namespace %s: %v\n", tenant.Namespace, err)
+			continue
+		}
+
+		accounts = append(accounts, namespaceAccounts...)
+	}
+
+	return accounts, nil
+}
+
+// GetAllActiveAccounts returns all active accounts across all namespaces
+// Used for watch refresh to ensure we catch any accounts that may have null expiration
+func (a *AccountStore) GetAllActiveAccounts(ctx context.Context) ([]*EmailAccount, error) {
+	var accounts []*EmailAccount
+
+	// Get all tenants to know which namespaces to query
+	tenantsQuery := datastore.NewQuery("Tenant").Namespace(DefaultNamespace)
+	var tenants []struct {
+		Namespace string `datastore:"namespace"`
+	}
+
+	if _, err := a.client.GetAll(ctx, tenantsQuery, &tenants); err != nil {
+		return nil, fmt.Errorf("failed to get tenants: %w", err)
+	}
+
+	// Query each namespace for active accounts
+	for _, tenant := range tenants {
+		query := datastore.NewQuery("EmailAccount").
+			Namespace(tenant.Namespace).
+			FilterField("status", "=", "active")
+
+		var namespaceAccounts []*EmailAccount
+		if _, err := a.client.GetAll(ctx, query, &namespaceAccounts); err != nil {
+			// Log but continue with other namespaces
+			fmt.Printf("⚠️  Failed to query namespace %s: %v\n", tenant.Namespace, err)
+			continue
+		}
+
+		accounts = append(accounts, namespaceAccounts...)
+	}
+
+	return accounts, nil
+}
+
 func (a *AccountStore) Close() error {
 	return a.client.Close()
 }
