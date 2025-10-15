@@ -36,6 +36,7 @@ type EmailRecord struct {
 	ThreadID     string    `bigquery:"thread_id"`
 	AccountID    string    `bigquery:"account_id"`
 	Sender       string    `bigquery:"sender"`
+	SenderName   string    `bigquery:"sender_name"`
 	Subject      string    `bigquery:"subject"`
 	BodyText     string    `bigquery:"body_text"`
 	BodyHTML     string    `bigquery:"body_html"`
@@ -44,6 +45,30 @@ type EmailRecord struct {
 	IngestedAt   time.Time `bigquery:"ingested_at"`
 	IsRead       bool      `bigquery:"is_read"`
 	Labels       []string  `bigquery:"labels"`
+}
+
+// parseSender extracts the name and email from a sender string
+// Format: "Name <email@example.com>" or just "email@example.com"
+func parseSender(sender string) (email, name string) {
+	sender = strings.TrimSpace(sender)
+
+	// Check if it has the format "Name <email>"
+	if idx := strings.Index(sender, "<"); idx != -1 {
+		name = strings.TrimSpace(sender[:idx])
+		// Extract email between < and >
+		if endIdx := strings.Index(sender[idx:], ">"); endIdx != -1 {
+			email = strings.TrimSpace(sender[idx+1 : idx+endIdx])
+		} else {
+			// Malformed, treat rest as email
+			email = strings.TrimSpace(sender[idx+1:])
+		}
+	} else {
+		// No angle brackets, treat entire string as email
+		email = sender
+		name = ""
+	}
+
+	return email, name
 }
 
 // CreateTenantDataset creates a BigQuery dataset for a tenant if it doesn't exist
@@ -80,6 +105,7 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 		// Table already exists - check if it needs schema updates
 		hasBodyHTML := false
 		hasBodyMarkdown := false
+		hasSenderName := false
 		messageIDRequired := false
 		hasClustering := false
 
@@ -89,6 +115,9 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 			}
 			if f.Name == "body_markdown" {
 				hasBodyMarkdown = true
+			}
+			if f.Name == "sender_name" {
+				hasSenderName = true
 			}
 			if f.Name == "message_id" && f.Required {
 				messageIDRequired = true
@@ -101,20 +130,35 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 		}
 
 		// Add missing fields if needed
-		var newSchema bigquery.Schema
-		var needsUpdate bool
+		needsSchemaUpdate := !hasBodyHTML || !hasBodyMarkdown || !hasSenderName || !messageIDRequired
 
-		if !hasBodyHTML || !hasBodyMarkdown || !messageIDRequired {
-			newSchema = make(bigquery.Schema, len(md.Schema))
-			copy(newSchema, md.Schema)
+		if needsSchemaUpdate {
+			// Build new schema with all existing fields plus missing ones
+			newSchema := make(bigquery.Schema, 0, len(md.Schema)+3)
 
+			// Copy existing fields, potentially updating message_id requirement
+			for _, field := range md.Schema {
+				newField := &bigquery.FieldSchema{
+					Name:        field.Name,
+					Type:        field.Type,
+					Description: field.Description,
+					Required:    field.Required,
+					Repeated:    field.Repeated,
+				}
+				// Update message_id to be required if it isn't already
+				if field.Name == "message_id" && !messageIDRequired {
+					newField.Required = true
+				}
+				newSchema = append(newSchema, newField)
+			}
+
+			// Add missing fields
 			if !hasBodyHTML {
 				newSchema = append(newSchema, &bigquery.FieldSchema{
 					Name:     "body_html",
 					Type:     bigquery.StringFieldType,
 					Required: false,
 				})
-				needsUpdate = true
 			}
 			if !hasBodyMarkdown {
 				newSchema = append(newSchema, &bigquery.FieldSchema{
@@ -122,25 +166,26 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 					Type:     bigquery.StringFieldType,
 					Required: false,
 				})
-				needsUpdate = true
 			}
-			if !messageIDRequired {
-				// Make message_id required for uniqueness
-				for _, field := range newSchema {
-					if field.Name == "message_id" {
-						field.Required = true
-						needsUpdate = true
-						break
-					}
-				}
+			if !hasSenderName {
+				newSchema = append(newSchema, &bigquery.FieldSchema{
+					Name:     "sender_name",
+					Type:     bigquery.StringFieldType,
+					Required: false,
+				})
 			}
-		}
 
-		// Update schema if needed
-		if needsUpdate {
+			// Update schema
 			update := bigquery.TableMetadataToUpdate{
 				Schema: newSchema,
 			}
+
+			// Refresh metadata to get latest ETag
+			md, err = table.Metadata(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to refresh table metadata: %w", err)
+			}
+
 			if _, uerr := table.Update(ctx, update, md.ETag); uerr != nil {
 				return fmt.Errorf("failed to update table schema: %w", uerr)
 			}
@@ -148,6 +193,12 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 
 		// Add clustering if not present
 		if !hasClustering {
+			// Refresh metadata to get latest ETag
+			md, err = table.Metadata(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to refresh table metadata for clustering: %w", err)
+			}
+
 			update := bigquery.TableMetadataToUpdate{
 				Clustering: &bigquery.Clustering{
 					Fields: []string{"message_id", "account_id"},
@@ -213,11 +264,13 @@ func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, 
 	// Convert messages to EmailRecord format
 	records := make([]*EmailRecord, 0, len(messages))
 	for _, msg := range messages {
+		senderEmail, senderName := parseSender(msg.Sender)
 		records = append(records, &EmailRecord{
 			MessageID:    msg.MessageID,
 			ThreadID:     msg.ThreadID,
 			AccountID:    accountID,
-			Sender:       msg.Sender,
+			Sender:       senderEmail,
+			SenderName:   senderName,
 			Subject:      msg.Subject,
 			BodyText:     msg.BodyText,
 			BodyHTML:     msg.BodyHTML,
@@ -290,11 +343,13 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 	// Convert all messages to records
 	records := make([]*EmailRecord, 0, len(messages))
 	for _, msg := range messages {
+		senderEmail, senderName := parseSender(msg.Sender)
 		records = append(records, &EmailRecord{
 			MessageID:    msg.MessageID,
 			ThreadID:     msg.ThreadID,
 			AccountID:    accountID,
-			Sender:       msg.Sender,
+			Sender:       senderEmail,
+			SenderName:   senderName,
 			Subject:      msg.Subject,
 			BodyText:     msg.BodyText,
 			BodyHTML:     msg.BodyHTML,
@@ -321,6 +376,7 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 			UPDATE SET
 				thread_id = source.thread_id,
 				sender = source.sender,
+				sender_name = source.sender_name,
 				subject = source.subject,
 				body_text = source.body_text,
 				body_html = source.body_html,
@@ -362,6 +418,7 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 			thread_id,
 			account_id,
 			sender,
+			sender_name,
 			subject,
 			body_text,
 			body_html,
