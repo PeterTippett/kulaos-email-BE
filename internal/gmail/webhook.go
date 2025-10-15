@@ -121,11 +121,18 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 	fmt.Printf("🔍 [WEBHOOK] Current token state for %s:\n", account.EmailAddress)
 	fmt.Printf("🔍 [WEBHOOK] - Access token length: %d\n", len(account.AccessToken))
 	fmt.Printf("🔍 [WEBHOOK] - Refresh token length: %d\n", len(account.RefreshToken))
-	fmt.Printf("🔍 [WEBHOOK] - Token expiry: %v\n", account.TokenExpiry)
-	fmt.Printf("🔍 [WEBHOOK] - Is token expired: %v\n", h.gmailClient.oauth.IsTokenExpired(account.TokenExpiry))
+	if account.TokenExpiry != nil {
+		fmt.Printf("🔍 [WEBHOOK] - Token expiry: %v\n", *account.TokenExpiry)
+		fmt.Printf("🔍 [WEBHOOK] - Is token expired: %v\n", h.gmailClient.oauth.IsTokenExpired(*account.TokenExpiry))
+	} else {
+		fmt.Printf("🔍 [WEBHOOK] - Token expiry: nil\n")
+	}
 
 	// Determine starting history ID
-	startHistoryID := account.LastHistoryID
+	var startHistoryID int64
+	if account.LastHistoryID != nil {
+		startHistoryID = *account.LastHistoryID
+	}
 	if startHistoryID == 0 {
 		// First notification after watch; use the notification's history as starting point
 		startHistoryID = int64(notification.HistoryID)

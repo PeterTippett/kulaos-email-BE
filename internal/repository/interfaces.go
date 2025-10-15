@@ -35,8 +35,8 @@ type AccountRepository interface {
 	// UpdateLastHistoryID updates the last processed Gmail history ID
 	UpdateLastHistoryID(ctx context.Context, namespace, accountID string, historyID int64) error
 
-	// DeleteAccount removes an account and its lookup entry
-	DeleteAccount(ctx context.Context, namespace, accountID, emailAddress string) error
+	// DisconnectAccount performs a soft delete by marking account as disconnected and clearing tokens
+	DisconnectAccount(ctx context.Context, namespace, accountID string) error
 
 	// Close closes the repository connection
 	Close() error

@@ -256,6 +256,7 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 		sanitizedAccounts[i] = map[string]interface{}{
 			"account_id":    acc.AccountID,
 			"email_address": acc.EmailAddress,
+			"status":        acc.Status,
 			"created_at":    acc.CreatedAt,
 		}
 	}
@@ -300,7 +301,7 @@ func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// DeleteAccount removes an email account and cleans up watch subscriptions
+// DeleteAccount disconnects an email account (soft delete) and cleans up watch subscriptions
 func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -327,29 +328,31 @@ func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	// Get account with decrypted tokens to stop watch
 	account, err := h.accountStore.GetAccountWithDecryptedTokens(ctx, tenant.Namespace, orgID, accountID)
 	if err != nil {
-		logger.FromContext(ctx).Error("Failed to get account for deletion",
+		logger.FromContext(ctx).Error("Failed to get account for disconnection",
 			zap.String("account_id", accountID),
 			zap.Error(err))
 		http.Error(w, "account not found", http.StatusNotFound)
 		return
 	}
 
-	// Stop Gmail watch subscription
-	if err := h.gmailClient.StopWatch(ctx, account.AccessToken, account.RefreshToken); err != nil {
-		logger.FromContext(ctx).Warn("Failed to stop watch subscription", zap.Error(err))
-		// Continue with deletion even if stopping watch fails
+	// Stop Gmail watch subscription (only if account is active and has tokens)
+	if account.Status == "active" && account.AccessToken != "" {
+		if err := h.gmailClient.StopWatch(ctx, account.AccessToken, account.RefreshToken); err != nil {
+			logger.FromContext(ctx).Warn("Failed to stop watch subscription", zap.Error(err))
+			// Continue with disconnection even if stopping watch fails
+		}
 	}
 
-	// Delete account and lookup entry from datastore
-	if err := h.accountStore.DeleteAccount(ctx, tenant.Namespace, accountID, account.EmailAddress); err != nil {
-		logger.FromContext(ctx).Error("Failed to delete account",
+	// Perform soft delete: mark as disconnected and clear sensitive tokens
+	if err := h.accountStore.DisconnectAccount(ctx, tenant.Namespace, accountID); err != nil {
+		logger.FromContext(ctx).Error("Failed to disconnect account",
 			zap.String("account_id", accountID),
 			zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	logger.FromContext(ctx).Info("Successfully deleted account",
+	logger.FromContext(ctx).Info("Successfully disconnected account",
 		zap.String("account_id", accountID),
 		zap.String("email", account.EmailAddress))
 	w.WriteHeader(http.StatusNoContent)

@@ -28,17 +28,19 @@ func NewAccountStore(ctx context.Context, projectID string, kmsService *encrypti
 }
 
 type EmailAccount struct {
-	AccountID         string    `datastore:"account_id"`
-	OrgID             string    `datastore:"org_id"`
-	EmailAddress      string    `datastore:"email_address"`
-	AccessToken       string    `datastore:"access_token,noindex"`  // Encrypted
-	RefreshToken      string    `datastore:"refresh_token,noindex"` // Encrypted
-	TokenExpiry       time.Time `datastore:"token_expiry"`
-	LastHistoryID     int64     `datastore:"last_history_id"`
-	WebhookChannelID  string    `datastore:"webhook_channel_id"`
-	WebhookExpiration time.Time `datastore:"webhook_expiration"`
-	CreatedAt         time.Time `datastore:"created_at"`
-	UpdatedAt         time.Time `datastore:"updated_at"`
+	AccountID         string     `datastore:"account_id"`
+	OrgID             string     `datastore:"org_id"`
+	EmailAddress      string     `datastore:"email_address"`
+	AccessToken       string     `datastore:"access_token,noindex"`  // Encrypted
+	RefreshToken      string     `datastore:"refresh_token,noindex"` // Encrypted
+	TokenExpiry       *time.Time `datastore:"token_expiry,omitempty"`
+	LastHistoryID     *int64     `datastore:"last_history_id,omitempty"`
+	WebhookChannelID  string     `datastore:"webhook_channel_id"`
+	WebhookExpiration *time.Time `datastore:"webhook_expiration,omitempty"`
+	Status            string     `datastore:"status"`                    // "active" or "disconnected"
+	DisconnectedAt    *time.Time `datastore:"disconnected_at,omitempty"` // When the account was disconnected (nil if never disconnected)
+	CreatedAt         time.Time  `datastore:"created_at"`
+	UpdatedAt         time.Time  `datastore:"updated_at"`
 }
 
 // EmailAccountLookup is stored in the DEFAULT namespace for routing
@@ -71,7 +73,8 @@ func (a *AccountStore) CreateAccount(ctx context.Context, namespace, orgID, emai
 		EmailAddress: emailAddress,
 		AccessToken:  encryptedAccess,
 		RefreshToken: encryptedRefresh,
-		TokenExpiry:  tokenExpiry,
+		TokenExpiry:  &tokenExpiry,
+		Status:       "active",
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -162,10 +165,12 @@ func (a *AccountStore) UpdateTokens(ctx context.Context, namespace, orgID, accou
 			return err
 		}
 
-		// Update tokens
+		// Update tokens and reactivate account if it was disconnected
 		account.AccessToken = encryptedAccess
 		account.RefreshToken = encryptedRefresh
-		account.TokenExpiry = tokenExpiry
+		account.TokenExpiry = &tokenExpiry
+		account.Status = "active"    // Reactivate account when tokens are updated
+		account.DisconnectedAt = nil // Clear disconnection timestamp when reconnecting
 		account.UpdatedAt = time.Now()
 
 		_, err := tx.Put(key, &account)
@@ -186,7 +191,7 @@ func (a *AccountStore) UpdateWebhookInfo(ctx context.Context, namespace, account
 		}
 
 		account.WebhookChannelID = channelID
-		account.WebhookExpiration = expiration
+		account.WebhookExpiration = &expiration
 		account.UpdatedAt = time.Now()
 
 		_, err := tx.Put(key, &account)
@@ -208,8 +213,8 @@ func (a *AccountStore) UpdateLastHistoryID(ctx context.Context, namespace, accou
 		}
 
 		// Only move forward
-		if historyID > account.LastHistoryID {
-			account.LastHistoryID = historyID
+		if account.LastHistoryID == nil || historyID > *account.LastHistoryID {
+			account.LastHistoryID = &historyID
 			account.UpdatedAt = time.Now()
 			_, err := tx.Put(key, &account)
 			return err
@@ -251,25 +256,34 @@ func (a *AccountStore) createLookupEntry(ctx context.Context, emailAddress, orgI
 	return err
 }
 
-// DeleteAccount removes an account and its lookup entry
-func (a *AccountStore) DeleteAccount(ctx context.Context, namespace, accountID, emailAddress string) error {
-	// Delete account from tenant namespace
-	accountKey := datastore.NameKey("EmailAccount", accountID, nil)
-	accountKey.Namespace = namespace
+// DisconnectAccount performs a soft delete by marking the account as disconnected
+// and clearing sensitive OAuth tokens
+func (a *AccountStore) DisconnectAccount(ctx context.Context, namespace, accountID string) error {
+	key := datastore.NameKey("EmailAccount", accountID, nil)
+	key.Namespace = namespace
 
-	if err := a.client.Delete(ctx, accountKey); err != nil {
-		return fmt.Errorf("failed to delete account: %w", err)
-	}
+	_, err := a.client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
+		var account EmailAccount
+		if err := tx.Get(key, &account); err != nil {
+			return fmt.Errorf("failed to get account: %w", err)
+		}
 
-	// Delete lookup entry from DEFAULT namespace
-	lookupKey := datastore.NameKey("EmailAccountLookup", emailAddress, nil)
-	lookupKey.Namespace = DefaultNamespace
+		// Mark as disconnected and clear sensitive tokens
+		now := time.Now()
+		account.Status = "disconnected"
+		account.DisconnectedAt = &now
+		account.AccessToken = ""
+		account.RefreshToken = ""
+		account.TokenExpiry = nil
+		account.WebhookChannelID = ""
+		account.WebhookExpiration = nil
+		account.UpdatedAt = now
 
-	if err := a.client.Delete(ctx, lookupKey); err != nil {
-		return fmt.Errorf("failed to delete lookup entry: %w", err)
-	}
+		_, err := tx.Put(key, &account)
+		return err
+	})
 
-	return nil
+	return err
 }
 
 func (a *AccountStore) Close() error {
