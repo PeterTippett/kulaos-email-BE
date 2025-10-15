@@ -1,16 +1,21 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	"github.com/google/uuid"
 	"github.com/yourusername/email-service/internal/auth"
 	"github.com/yourusername/email-service/internal/datastore"
 	"github.com/yourusername/email-service/internal/gmail"
+	"github.com/yourusername/email-service/internal/logger"
 	"github.com/yourusername/email-service/internal/storage"
 )
 
@@ -58,7 +63,8 @@ func (h *Handlers) Health(w http.ResponseWriter, r *http.Request) {
 
 // StartGmailAuth initiates the Gmail OAuth flow
 func (h *Handlers) StartGmailAuth(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 	orgID := auth.GetOrgID(ctx)
 
 	if orgID == "" {
@@ -72,8 +78,10 @@ func (h *Handlers) StartGmailAuth(w http.ResponseWriter, r *http.Request) {
 		// Create tenant if doesn't exist
 		_, err = h.tenantStore.CreateTenant(ctx, orgID)
 		if err != nil {
-			log.Printf("Failed to create tenant: %v", err)
-			http.Error(w, "failed to create tenant", http.StatusInternalServerError)
+			logger.FromContext(ctx).Error("Failed to create tenant",
+				zap.String("org_id", orgID),
+				zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -92,7 +100,8 @@ func (h *Handlers) StartGmailAuth(w http.ResponseWriter, r *http.Request) {
 
 // GmailCallback handles the OAuth callback from Gmail
 func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
 
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
@@ -116,8 +125,10 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 	// Exchange code for tokens
 	tokenResp, err := h.gmailOAuth.ExchangeCode(ctx, code)
 	if err != nil {
-		log.Printf("Failed to exchange code: %v", err)
-		http.Error(w, "failed to exchange code", http.StatusInternalServerError)
+		logger.FromContext(ctx).Error("Failed to exchange code",
+			zap.String("org_id", orgID),
+			zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -127,8 +138,10 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 		// Create tenant if doesn't exist
 		tenant, err = h.tenantStore.CreateTenant(ctx, orgID)
 		if err != nil {
-			log.Printf("Failed to create tenant: %v", err)
-			http.Error(w, "failed to create tenant", http.StatusInternalServerError)
+			logger.FromContext(ctx).Error("Failed to create tenant",
+				zap.String("org_id", orgID),
+				zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -142,7 +155,9 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 		// Email already known
 		// Ensure it belongs to this tenant; if not, reject
 		if lookup.Namespace != tenant.Namespace {
-			log.Printf("Email %s already connected to a different tenant (ns=%s)", tokenResp.Email, lookup.Namespace)
+			logger.FromContext(ctx).Warn("Email already connected to different tenant",
+				zap.String("email", tokenResp.Email),
+				zap.String("namespace", lookup.Namespace))
 			http.Error(w, "email already connected to another organization", http.StatusConflict)
 			return
 		}
@@ -157,8 +172,10 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 			tokenResp.RefreshToken,
 			tokenResp.Expiry,
 		); err != nil {
-			log.Printf("Failed to update tokens for account: %v", err)
-			http.Error(w, "failed to update account tokens", http.StatusInternalServerError)
+			logger.FromContext(ctx).Error("Failed to update tokens",
+				zap.String("account_id", lookup.AccountID),
+				zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		accountID = lookup.AccountID
@@ -174,8 +191,10 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 			tokenResp.Expiry,
 		)
 		if err != nil {
-			log.Printf("Failed to create account: %v", err)
-			http.Error(w, "failed to create account", http.StatusInternalServerError)
+			logger.FromContext(ctx).Error("Failed to create account",
+				zap.String("email", tokenResp.Email),
+				zap.Error(err))
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		accountID = account.AccountID
@@ -185,16 +204,16 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 	topicName := fmt.Sprintf("projects/%s/topics/%s", h.projectID, h.pubsubTopic)
 	watchResp, err := h.gmailClient.SetupWatch(ctx, tokenResp.AccessToken, tokenResp.RefreshToken, topicName)
 	if err != nil {
-		log.Printf("Failed to setup watch: %v", err)
+		logger.FromContext(ctx).Warn("Failed to setup watch", zap.Error(err))
 		// Don't fail - account is still created
 	} else {
 		// Update account with webhook info
 		if err := h.accountStore.UpdateWebhookInfo(ctx, tenant.Namespace, accountID, watchResp.ChannelID, watchResp.Expiration); err != nil {
-			log.Printf("Failed to update webhook info: %v", err)
+			logger.FromContext(ctx).Warn("Failed to update webhook info", zap.Error(err))
 		}
 		// Record starting history ID for incremental sync
 		if err := h.accountStore.UpdateLastHistoryID(ctx, tenant.Namespace, accountID, watchResp.StartHistoryID); err != nil {
-			log.Printf("Failed to update starting history ID: %v", err)
+			logger.FromContext(ctx).Warn("Failed to update starting history ID", zap.Error(err))
 		}
 	}
 
@@ -205,7 +224,8 @@ func (h *Handlers) GmailCallback(w http.ResponseWriter, r *http.Request) {
 
 // ListAccounts returns the list of connected Gmail accounts for the authenticated org
 func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 	orgID := auth.GetOrgID(ctx)
 
 	if orgID == "" {
@@ -223,8 +243,10 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 
 	accounts, err := h.accountStore.ListAccountsByOrg(ctx, tenant.Namespace)
 	if err != nil {
-		log.Printf("Failed to list accounts: %v", err)
-		http.Error(w, "failed to list accounts", http.StatusInternalServerError)
+		logger.FromContext(ctx).Error("Failed to list accounts",
+			zap.String("org_id", orgID),
+			zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -245,7 +267,8 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 
 // ListEmails returns recent emails for the authenticated org
 func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 	orgID := auth.GetOrgID(ctx)
 
 	if orgID == "" {
@@ -264,7 +287,7 @@ func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
 	// Query BigQuery for recent emails
 	emails, err := h.bqStore.ListEmails(ctx, tenant.BigQueryDataset, 50)
 	if err != nil {
-		log.Printf("Failed to list emails: %v", err)
+		logger.FromContext(ctx).Warn("Failed to list emails", zap.Error(err))
 		// Return empty list if dataset doesn't exist yet
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"emails": []interface{}{},
@@ -279,7 +302,8 @@ func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
 
 // DeleteAccount removes an email account and cleans up watch subscriptions
 func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
 	orgID := auth.GetOrgID(ctx)
 
 	if orgID == "" {
@@ -287,19 +311,12 @@ func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure DELETE method and extract account ID from path
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Expect path like /api/accounts/{accountId}
-	const prefix = "/api/accounts/"
-	if !strings.HasPrefix(r.URL.Path, prefix) || len(r.URL.Path) <= len(prefix) {
+	// Extract account ID from URL parameter (chi router)
+	accountID := chi.URLParam(r, "accountID")
+	if accountID == "" {
 		http.Error(w, "account ID is required", http.StatusBadRequest)
 		return
 	}
-	accountID := strings.TrimPrefix(r.URL.Path, prefix)
 
 	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
 	if err != nil {
@@ -310,24 +327,30 @@ func (h *Handlers) DeleteAccount(w http.ResponseWriter, r *http.Request) {
 	// Get account with decrypted tokens to stop watch
 	account, err := h.accountStore.GetAccountWithDecryptedTokens(ctx, tenant.Namespace, orgID, accountID)
 	if err != nil {
-		log.Printf("Failed to get account for deletion: %v", err)
+		logger.FromContext(ctx).Error("Failed to get account for deletion",
+			zap.String("account_id", accountID),
+			zap.Error(err))
 		http.Error(w, "account not found", http.StatusNotFound)
 		return
 	}
 
 	// Stop Gmail watch subscription
 	if err := h.gmailClient.StopWatch(ctx, account.AccessToken, account.RefreshToken); err != nil {
-		log.Printf("Warning: Failed to stop watch subscription: %v", err)
+		logger.FromContext(ctx).Warn("Failed to stop watch subscription", zap.Error(err))
 		// Continue with deletion even if stopping watch fails
 	}
 
 	// Delete account and lookup entry from datastore
 	if err := h.accountStore.DeleteAccount(ctx, tenant.Namespace, accountID, account.EmailAddress); err != nil {
-		log.Printf("Failed to delete account: %v", err)
-		http.Error(w, "failed to delete account", http.StatusInternalServerError)
+		logger.FromContext(ctx).Error("Failed to delete account",
+			zap.String("account_id", accountID),
+			zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("Successfully deleted account %s (%s)", accountID, account.EmailAddress)
+	logger.FromContext(ctx).Info("Successfully deleted account",
+		zap.String("account_id", accountID),
+		zap.String("email", account.EmailAddress))
 	w.WriteHeader(http.StatusNoContent)
 }

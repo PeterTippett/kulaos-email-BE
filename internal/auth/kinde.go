@@ -3,12 +3,14 @@ package auth
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
+	"go.uber.org/zap"
+
 	golangjwt "github.com/golang-jwt/jwt/v5"
 	"github.com/kinde-oss/kinde-go/jwt"
+	"github.com/yourusername/email-service/internal/logger"
 )
 
 type contextKey string
@@ -38,9 +40,9 @@ func NewKindeAuth(domain, clientID, clientSecret string) *KindeAuth {
 	}
 }
 
-// RequireAuth middleware that extracts and validates Kinde JWT token
-func (k *KindeAuth) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+// Middleware is a chi-compatible middleware that extracts and validates Kinde JWT token
+func (k *KindeAuth) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "missing authorization header", http.StatusUnauthorized)
@@ -86,8 +88,8 @@ func (k *KindeAuth) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		)
 
 		if err != nil {
-			log.Printf("⚠️  Token validation failed: %v", err)
-			http.Error(w, fmt.Sprintf("invalid token: %v", err), http.StatusUnauthorized)
+			logger.Get().Warn("Token validation failed", zap.Error(err))
+			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
 
@@ -123,7 +125,14 @@ func (k *KindeAuth) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		ctx = context.WithValue(ctx, UserIDKey, sub)
 		ctx = context.WithValue(ctx, UserEmailKey, email)
 
-		next(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// RequireAuth is a handler wrapper for backward compatibility
+func (k *KindeAuth) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		k.Middleware(next).ServeHTTP(w, r)
 	}
 }
 

@@ -141,12 +141,7 @@ func (a *AccountStore) ListAccountsByOrg(ctx context.Context, namespace string) 
 }
 
 func (a *AccountStore) UpdateTokens(ctx context.Context, namespace, orgID, accountID, accessToken, refreshToken string, tokenExpiry time.Time) error {
-	account, err := a.GetAccount(ctx, namespace, accountID)
-	if err != nil {
-		return err
-	}
-
-	// Encrypt new tokens
+	// Encrypt new tokens before transaction
 	encryptedAccess, err := a.kmsService.Encrypt(ctx, orgID, accessToken)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt access token: %w", err)
@@ -157,55 +152,74 @@ func (a *AccountStore) UpdateTokens(ctx context.Context, namespace, orgID, accou
 		return fmt.Errorf("failed to encrypt refresh token: %w", err)
 	}
 
-	account.AccessToken = encryptedAccess
-	account.RefreshToken = encryptedRefresh
-	account.TokenExpiry = tokenExpiry
-	account.UpdatedAt = time.Now()
-
+	// Use transaction to prevent race conditions
 	key := datastore.NameKey("EmailAccount", accountID, nil)
 	key.Namespace = namespace
 
-	_, err = a.client.Put(ctx, key, account)
+	_, err = a.client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
+		var account EmailAccount
+		if err := tx.Get(key, &account); err != nil {
+			return err
+		}
+
+		// Update tokens
+		account.AccessToken = encryptedAccess
+		account.RefreshToken = encryptedRefresh
+		account.TokenExpiry = tokenExpiry
+		account.UpdatedAt = time.Now()
+
+		_, err := tx.Put(key, &account)
+		return err
+	})
+
 	return err
 }
 
 func (a *AccountStore) UpdateWebhookInfo(ctx context.Context, namespace, accountID, channelID string, expiration time.Time) error {
-	account, err := a.GetAccount(ctx, namespace, accountID)
-	if err != nil {
-		return err
-	}
-
-	account.WebhookChannelID = channelID
-	account.WebhookExpiration = expiration
-	account.UpdatedAt = time.Now()
-
 	key := datastore.NameKey("EmailAccount", accountID, nil)
 	key.Namespace = namespace
 
-	_, err = a.client.Put(ctx, key, account)
+	_, err := a.client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
+		var account EmailAccount
+		if err := tx.Get(key, &account); err != nil {
+			return err
+		}
+
+		account.WebhookChannelID = channelID
+		account.WebhookExpiration = expiration
+		account.UpdatedAt = time.Now()
+
+		_, err := tx.Put(key, &account)
+		return err
+	})
+
 	return err
 }
 
 // UpdateLastHistoryID updates the stored Gmail history ID used for incremental sync
 func (a *AccountStore) UpdateLastHistoryID(ctx context.Context, namespace, accountID string, historyID int64) error {
-	account, err := a.GetAccount(ctx, namespace, accountID)
-	if err != nil {
-		return err
-	}
+	key := datastore.NameKey("EmailAccount", accountID, nil)
+	key.Namespace = namespace
 
-	// Only move forward
-	if historyID > account.LastHistoryID {
-		account.LastHistoryID = historyID
-		account.UpdatedAt = time.Now()
-
-		key := datastore.NameKey("EmailAccount", accountID, nil)
-		key.Namespace = namespace
-
-		if _, err := a.client.Put(ctx, key, account); err != nil {
+	_, err := a.client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
+		var account EmailAccount
+		if err := tx.Get(key, &account); err != nil {
 			return err
 		}
-	}
-	return nil
+
+		// Only move forward
+		if historyID > account.LastHistoryID {
+			account.LastHistoryID = historyID
+			account.UpdatedAt = time.Now()
+			_, err := tx.Put(key, &account)
+			return err
+		}
+
+		// No update needed
+		return nil
+	})
+
+	return err
 }
 
 func (a *AccountStore) GetAccountByEmail(ctx context.Context, emailAddress string) (*EmailAccountLookup, error) {

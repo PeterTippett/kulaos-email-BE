@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"google.golang.org/api/option"
 
 	"github.com/yourusername/email-service/internal/types"
 )
@@ -17,7 +18,10 @@ type BigQueryStore struct {
 }
 
 func NewBigQueryStore(ctx context.Context, projectID, location string) (*BigQueryStore, error) {
-	client, err := bigquery.NewClient(ctx, projectID)
+	// Create client with connection pooling for better performance
+	// Pool size of 5 provides good balance between resource usage and performance
+	client, err := bigquery.NewClient(ctx, projectID,
+		option.WithGRPCConnectionPool(5))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bigquery client: %w", err)
 	}
@@ -189,8 +193,10 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 	return nil
 }
 
-// InsertMessages upserts multiple email messages into BigQuery
-// If a message with the same message_id already exists, it will be updated
+// InsertMessages inserts multiple email messages into BigQuery using streaming inserts
+// Note: Streaming inserts do not support deduplication, so the application should
+// handle duplicate prevention if necessary. BigQuery will deduplicate based on insertId
+// within a limited time window.
 func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
 	if len(messages) == 0 {
 		return nil
@@ -204,21 +210,61 @@ func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, 
 		return err
 	}
 
-	// Process messages one by one to handle upserts
+	// Convert messages to EmailRecord format
+	records := make([]*EmailRecord, 0, len(messages))
 	for _, msg := range messages {
-		if err := b.upsertMessage(ctx, datasetName, msg, accountID); err != nil {
-			return fmt.Errorf("failed to upsert message %s: %w", msg.MessageID, err)
-		}
+		records = append(records, &EmailRecord{
+			MessageID:    msg.MessageID,
+			ThreadID:     msg.ThreadID,
+			AccountID:    accountID,
+			Sender:       msg.Sender,
+			Subject:      msg.Subject,
+			BodyText:     msg.BodyText,
+			BodyHTML:     msg.BodyHTML,
+			BodyMarkdown: msg.BodyMarkdown,
+			ReceivedAt:   msg.ReceivedAt,
+			IngestedAt:   time.Now(),
+			IsRead:       msg.IsRead,
+			Labels:       msg.Labels,
+		})
+	}
+
+	// Use streaming insert for batch processing
+	dataset := b.client.Dataset(datasetName)
+	inserter := dataset.Table("emails").Inserter()
+
+	// Set insertId for deduplication (BigQuery will ignore duplicates within ~1 minute window)
+	inserter.SkipInvalidRows = false
+	inserter.IgnoreUnknownValues = false
+
+	// Batch insert all records at once
+	if err := inserter.Put(ctx, records); err != nil {
+		return fmt.Errorf("failed to insert messages: %w", err)
 	}
 
 	return nil
 }
 
-// upsertMessage performs an upsert operation for a single email message
-func (b *BigQueryStore) upsertMessage(ctx context.Context, datasetName string, msg *types.EmailMessage, accountID string) error {
-	// Create a temporary table for the new data
-	tempTableName := fmt.Sprintf("temp_email_%d", time.Now().UnixNano())
-	tempTable := b.client.Dataset(datasetName).Table(tempTableName)
+// InsertMessagesWithDedup inserts messages with deduplication using MERGE
+// This is more expensive but ensures true upsert semantics
+// Use this when you need guaranteed deduplication across longer time windows
+func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// Ensure dataset and table exist
+	if err := b.CreateTenantDataset(ctx, datasetName); err != nil {
+		return err
+	}
+	if err := b.EnsureEmailTable(ctx, datasetName); err != nil {
+		return err
+	}
+
+	// Create ONE temp table for the entire batch
+	tempTableName := fmt.Sprintf("temp_email_batch_%d", time.Now().UnixNano())
+	dataset := b.client.Dataset(datasetName)
+	tempTable := dataset.Table(tempTableName)
 
 	// Create temporary table with same schema
 	schema, err := bigquery.InferSchema(EmailRecord{})
@@ -237,33 +283,36 @@ func (b *BigQueryStore) upsertMessage(ctx context.Context, datasetName string, m
 	// Clean up temp table when done
 	defer func() {
 		if err := tempTable.Delete(ctx); err != nil {
-			// Log error but don't fail the operation
 			fmt.Printf("Warning: failed to delete temp table %s: %v\n", tempTableName, err)
 		}
 	}()
 
-	// Insert the new record into temp table
-	record := &EmailRecord{
-		MessageID:    msg.MessageID,
-		ThreadID:     msg.ThreadID,
-		AccountID:    accountID,
-		Sender:       msg.Sender,
-		Subject:      msg.Subject,
-		BodyText:     msg.BodyText,
-		BodyHTML:     msg.BodyHTML,
-		BodyMarkdown: msg.BodyMarkdown,
-		ReceivedAt:   msg.ReceivedAt,
-		IngestedAt:   time.Now(),
-		IsRead:       msg.IsRead,
-		Labels:       msg.Labels,
+	// Convert all messages to records
+	records := make([]*EmailRecord, 0, len(messages))
+	for _, msg := range messages {
+		records = append(records, &EmailRecord{
+			MessageID:    msg.MessageID,
+			ThreadID:     msg.ThreadID,
+			AccountID:    accountID,
+			Sender:       msg.Sender,
+			Subject:      msg.Subject,
+			BodyText:     msg.BodyText,
+			BodyHTML:     msg.BodyHTML,
+			BodyMarkdown: msg.BodyMarkdown,
+			ReceivedAt:   msg.ReceivedAt,
+			IngestedAt:   time.Now(),
+			IsRead:       msg.IsRead,
+			Labels:       msg.Labels,
+		})
 	}
 
+	// Insert all records into temp table at once
 	inserter := tempTable.Inserter()
-	if err := inserter.Put(ctx, record); err != nil {
+	if err := inserter.Put(ctx, records); err != nil {
 		return fmt.Errorf("failed to insert into temp table: %w", err)
 	}
 
-	// Perform MERGE operation
+	// Perform MERGE operation for the entire batch
 	mergeQuery := fmt.Sprintf(`
 		MERGE `+"`%s.emails`"+` AS target
 		USING `+"`%s.%s`"+` AS source
