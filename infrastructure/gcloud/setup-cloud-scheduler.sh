@@ -5,9 +5,9 @@
 set -e
 
 # Configuration - Update these values
-PROJECT_ID="your-gcp-project-id"
-REGION="us-central1"
-BACKEND_SERVICE_URL="https://your-backend-service-url"
+PROJECT_ID="kulaos-email-prod"
+REGION="australia-southeast1"
+BACKEND_SERVICE_URL="https://kulaos-email-prod.ts.r.appspot.com"
 SERVICE_ACCOUNT_NAME="gmail-watch-scheduler"
 JOB_NAME="gmail-watch-refresh"
 
@@ -47,7 +47,7 @@ echo "Creating Cloud Scheduler job: ${JOB_NAME}"
 gcloud scheduler jobs create http $JOB_NAME \
   --location=$REGION \
   --schedule="0 2 * * *" \
-  --time-zone="UTC" \
+  --time-zone="Australia/Sydney" \
   --uri="${BACKEND_SERVICE_URL}/cron/refresh-watches" \
   --http-method=POST \
   --oidc-service-account-email=$SERVICE_ACCOUNT_EMAIL \
@@ -63,7 +63,7 @@ echo "✅ Cloud Scheduler job created successfully!"
 echo ""
 echo "Job details:"
 echo "  Name: ${JOB_NAME}"
-echo "  Schedule: Daily at 2:00 AM UTC"
+echo "  Schedule: Daily at 2:00 AM Australia/Sydney"
 echo "  Endpoint: ${BACKEND_SERVICE_URL}/cron/refresh-watches"
 echo "  Service Account: ${SERVICE_ACCOUNT_EMAIL}"
 echo ""
