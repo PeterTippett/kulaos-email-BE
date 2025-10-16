@@ -1,0 +1,77 @@
+runtime: go124
+
+# App Engine configuration
+env_variables:
+  # GCP Configuration
+  PROJECT_ID: "kulaos-email-prod"
+  KMS_LOCATION: "global"
+  KMS_KEYRING: "email-service-keyring"
+  BIGQUERY_LOCATION: "australia-southeast1"
+
+  # Backend Configuration
+  BACKEND_PORT: "8080" # App Engine standard port
+
+  # Kinde Authentication (non-sensitive values)
+  KINDE_DOMAIN: "kulaos.kinde.com"
+  KINDE_REDIRECT_URI: "https://kulaos-email-prod.ts.r.appspot.com/api/auth/kinde/callback"
+
+  # Gmail OAuth (non-sensitive values)
+  GMAIL_REDIRECT_URI: "https://kulaos-email-prod.ts.r.appspot.com/auth/gmail/callback"
+
+  # Frontend URL (update with your actual frontend URL)
+  FRONTEND_BASE_URL: "https://temp.com"
+
+  # Pub/Sub
+  PUBSUB_TOPIC: "gmail-notifications"
+
+  # Environment
+  ENVIRONMENT: "production"
+
+  # Secret Manager secret names (for runtime fetching)
+  KINDE_CLIENT_ID_SECRET_NAME: "kinde-client-id"
+  KINDE_CLIENT_SECRET_SECRET_NAME: "kinde-client-secret"
+  GMAIL_CLIENT_ID_SECRET_NAME: "gmail-client-id"
+  GMAIL_CLIENT_SECRET_SECRET_NAME: "gmail-client-secret"
+
+# Automatic scaling configuration
+automatic_scaling:
+  min_instances: 1
+  max_instances: 10
+  target_cpu_utilization: 0.6
+  target_throughput_utilization: 0.6
+
+# Health check configuration
+readiness_check:
+  path: "/health"
+  check_interval_sec: 5
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 2
+
+liveness_check:
+  path: "/health"
+  check_interval_sec: 30
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 2
+
+# Network configuration
+network:
+  forwarded_ports:
+    - 8080
+
+# Resource limits
+resources:
+  cpu: 1
+  memory_gb: 0.5
+  disk_size_gb: 10
+
+# Handlers for different routes
+handlers:
+  # Serve static files (if any)
+  - url: /static
+    static_dir: static
+
+  # All other requests go to the Go application
+  - url: /.*
+    script: auto

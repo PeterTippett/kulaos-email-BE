@@ -35,6 +35,8 @@ Thumbs.db
 
 # Build output
 bin/
+server
+!cmd/server/main.go
 
 # Logs
 *.log
