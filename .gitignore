@@ -34,7 +34,6 @@ service-account-key.json
 Thumbs.db
 
 # Build output
-server
 bin/
 
 # Logs
