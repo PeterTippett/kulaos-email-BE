@@ -319,14 +319,15 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 	dataset := b.client.Dataset(datasetName)
 	tempTable := dataset.Table(tempTableName)
 
-	// Create temporary table with same schema
-	schema, err := bigquery.InferSchema(EmailRecord{})
+	// Create temporary table with same schema as the target table
+	targetTable := dataset.Table("emails")
+	targetMetadata, err := targetTable.Metadata(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to infer schema: %w", err)
+		return fmt.Errorf("failed to get target table metadata: %w", err)
 	}
 
 	tempMetadata := &bigquery.TableMetadata{
-		Schema: schema,
+		Schema: targetMetadata.Schema,
 	}
 
 	if err := tempTable.Create(ctx, tempMetadata); err != nil {

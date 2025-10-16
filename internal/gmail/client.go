@@ -12,6 +12,27 @@ import (
 	"github.com/yourusername/email-service/internal/types"
 )
 
+// hasLabel returns true if the given label is present in the slice
+func hasLabel(labels []string, target string) bool {
+	for _, l := range labels {
+		if l == target {
+			return true
+		}
+	}
+	return false
+}
+
+// isMessageRelevant returns true if the message should be processed
+// Only process messages that are in INBOX or SENT and are NOT drafts
+func isMessageRelevant(labels []string) bool {
+	// Must have INBOX or SENT label
+	hasInboxOrSent := hasLabel(labels, "INBOX") || hasLabel(labels, "SENT")
+	// Must NOT be a draft
+	notDraft := !hasLabel(labels, "DRAFT")
+
+	return hasInboxOrSent && notDraft
+}
+
 type GmailClient struct {
 	oauth *GmailOAuth
 }
@@ -37,8 +58,9 @@ func (g *GmailClient) SetupWatch(ctx context.Context, accessToken, refreshToken,
 	}
 
 	watchRequest := &gmail.WatchRequest{
-		TopicName: topicName,
-		LabelIds:  []string{"INBOX"},
+		TopicName:           topicName,
+		LabelIds:            []string{"INBOX", "SENT"},
+		LabelFilterBehavior: "include",
 	}
 
 	watchResp, err := gmailService.Users.Watch("me", watchRequest).Do()
@@ -65,6 +87,7 @@ func (g *GmailClient) FetchMessage(ctx context.Context, accessToken, refreshToke
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
 	}
 
+	// Request labels explicitly to ensure we can filter correctly
 	msg, err := gmailService.Users.Messages.Get("me", messageID).Format("full").Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch message: %w", err)
@@ -81,7 +104,7 @@ func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToke
 		return nil, fmt.Errorf("failed to create gmail service: %w", err)
 	}
 
-	listResp, err := gmailService.Users.Messages.List("me").MaxResults(maxResults).Do()
+	listResp, err := gmailService.Users.Messages.List("me").MaxResults(maxResults).LabelIds("INBOX", "SENT").Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list messages: %w", err)
 	}
@@ -92,7 +115,14 @@ func (g *GmailClient) ListMessages(ctx context.Context, accessToken, refreshToke
 		if err != nil {
 			continue
 		}
-		messages = append(messages, msg)
+		// Filter out drafts and only keep INBOX or SENT
+		fmt.Printf("🔍 [GMAIL] Message %s labels: %v\n", msg.MessageID, msg.Labels)
+		if isMessageRelevant(msg.Labels) {
+			fmt.Printf("✅ [GMAIL] Message %s passed filter (INBOX/SENT, not DRAFT)\n", msg.MessageID)
+			messages = append(messages, msg)
+		} else {
+			fmt.Printf("❌ [GMAIL] Message %s filtered out (not INBOX/SENT or is DRAFT)\n", msg.MessageID)
+		}
 	}
 
 	return messages, nil
@@ -119,7 +149,14 @@ func (g *GmailClient) FetchNewMessages(ctx context.Context, accessToken, refresh
 			if err != nil {
 				continue
 			}
-			messages = append(messages, fullMsg)
+			// Filter out drafts and only keep INBOX or SENT
+			fmt.Printf("🔍 [GMAIL] Message %s labels: %v\n", fullMsg.MessageID, fullMsg.Labels)
+			if isMessageRelevant(fullMsg.Labels) {
+				fmt.Printf("✅ [GMAIL] Message %s passed filter (INBOX/SENT, not DRAFT)\n", fullMsg.MessageID)
+				messages = append(messages, fullMsg)
+			} else {
+				fmt.Printf("❌ [GMAIL] Message %s filtered out (not INBOX/SENT or is DRAFT)\n", fullMsg.MessageID)
+			}
 		}
 	}
 
@@ -159,7 +196,14 @@ func (g *GmailClient) FetchNewMessagesPaged(ctx context.Context, accessToken, re
 				if err != nil {
 					continue
 				}
-				allMessages = append(allMessages, fullMsg)
+				// Filter out drafts and only keep INBOX or SENT
+				fmt.Printf("🔍 [GMAIL] Message %s labels: %v\n", fullMsg.MessageID, fullMsg.Labels)
+				if isMessageRelevant(fullMsg.Labels) {
+					fmt.Printf("✅ [GMAIL] Message %s passed filter (INBOX/SENT, not DRAFT)\n", fullMsg.MessageID)
+					allMessages = append(allMessages, fullMsg)
+				} else {
+					fmt.Printf("❌ [GMAIL] Message %s filtered out (not INBOX/SENT or is DRAFT)\n", fullMsg.MessageID)
+				}
 			}
 		}
 

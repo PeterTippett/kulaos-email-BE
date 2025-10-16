@@ -117,17 +117,6 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Log current token state for debugging
-	fmt.Printf("🔍 [WEBHOOK] Current token state for %s:\n", account.EmailAddress)
-	fmt.Printf("🔍 [WEBHOOK] - Access token length: %d\n", len(account.AccessToken))
-	fmt.Printf("🔍 [WEBHOOK] - Refresh token length: %d\n", len(account.RefreshToken))
-	if account.TokenExpiry != nil {
-		fmt.Printf("🔍 [WEBHOOK] - Token expiry: %v\n", *account.TokenExpiry)
-		fmt.Printf("🔍 [WEBHOOK] - Is token expired: %v\n", h.gmailClient.oauth.IsTokenExpired(*account.TokenExpiry))
-	} else {
-		fmt.Printf("🔍 [WEBHOOK] - Token expiry: nil\n")
-	}
-
 	// Determine starting history ID
 	var startHistoryID int64
 	if account.LastHistoryID != nil {
@@ -228,7 +217,7 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 
 	// Store messages in tenant's BigQuery dataset
 	if len(messages) > 0 {
-		if err := h.bqStore.InsertMessages(ctx, tenant.BigQueryDataset, messages, account.AccountID); err != nil {
+		if err := h.bqStore.InsertMessagesWithDedup(ctx, tenant.BigQueryDataset, messages, account.AccountID); err != nil {
 			log.Printf("❌ Failed to store messages in BigQuery: %v", err)
 		} else {
 			log.Printf("✓ Stored %d messages in BigQuery dataset: %s", len(messages), tenant.BigQueryDataset)
@@ -277,7 +266,13 @@ func (h *WebhookHandler) fetchMessagesWithService(ctx context.Context, gmailServ
 				if err != nil {
 					continue
 				}
-				allMessages = append(allMessages, emailMsg)
+
+				// Debug: show labels and filtering decision
+				fmt.Printf("🔍 [WEBHOOK] Message %s labels: %v\n", emailMsg.MessageID, emailMsg.Labels)
+				if isMessageRelevant(emailMsg.Labels) {
+					allMessages = append(allMessages, emailMsg)
+				} else {
+				}
 			}
 		}
 
