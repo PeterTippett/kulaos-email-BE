@@ -52,6 +52,8 @@ func (t *TenantStore) CreateTenant(ctx context.Context, orgID string) (*Tenant, 
 		UpdatedAt:       time.Now(),
 	}
 
+	fmt.Printf("🔍 [TENANT] Created tenant with BigQueryDataset: %s (from orgID: %s)\n", tenant.BigQueryDataset, orgID)
+
 	key := datastore.NameKey("Tenant", baseOrgID, nil)
 	key.Namespace = DefaultNamespace
 

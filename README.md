@@ -71,7 +71,7 @@ jwt.ParseFromString(
 
 - Each Kinde organization represents a tenant
 - Datastore uses namespaces (format: `tenant_{org_id}`)
-- BigQuery creates separate datasets per tenant (format: `tenant_{org_id}_emails`)
+- BigQuery creates separate datasets per tenant (format: `tenant_{org_id}`)
 - KMS encryption keys are tenant-specific (format: `tenant_{org_id}_key`)
 
 **Security Features:**
@@ -592,7 +592,7 @@ go run cmd/server/main.go
 
 ```bash
 bq ls  # List datasets
-bq query --use_legacy_sql=false 'SELECT * FROM `tenant_YOUR_ORG_ID_emails.emails` ORDER BY received_at DESC LIMIT 10'
+bq query --use_legacy_sql=false 'SELECT * FROM `tenant_YOUR_ORG_ID.emails` ORDER BY received_at DESC LIMIT 10'
 ```
 
 ## Troubleshooting
@@ -733,7 +733,7 @@ Errors like `invalid token: token signature is invalid` or `token validation fai
 
 - Check backend logs for BigQuery errors
 - Verify dataset exists: `bq ls`
-- Verify table exists: `bq show tenant_YOUR_ORG_ID_emails.emails`
+- Verify table exists: `bq show tenant_YOUR_ORG_ID.emails`
 - Check service account has BigQuery admin role
 - Query for errors in BigQuery job history
 
