@@ -18,8 +18,8 @@ env_variables:
   # Gmail OAuth (non-sensitive values)
   GMAIL_REDIRECT_URI: "https://kulaos-email-prod.ts.r.appspot.com/auth/gmail/callback"
 
-  # Frontend URL (update with your actual frontend URL)
-  FRONTEND_BASE_URL: "https://temp.com"
+  # Frontend URL
+  FRONTEND_BASE_URL: "https://kulaos-email-fe.vercel.app"
 
   # Pub/Sub
   PUBSUB_TOPIC: "gmail-notifications"
