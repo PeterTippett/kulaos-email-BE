@@ -95,8 +95,13 @@ func main() {
 	r.Use(requestIDMiddleware)  // Add request ID to logger context
 	r.Use(loggingMiddleware)    // Log all requests
 	r.Use(middleware.Recoverer) // Recover from panics
-	r.Use(corsMiddleware)       // CORS for local development
-	r.Use(rateLimiter.Limit)    // Rate limiting per organization
+	// Configure CORS to allow requests only from the configured frontend base URL
+	allowedOrigins := []string{}
+	if cfg.FrontendBaseURL != "" {
+		allowedOrigins = append(allowedOrigins, cfg.FrontendBaseURL)
+	}
+	r.Use(corsMiddleware(allowedOrigins))
+	r.Use(rateLimiter.Limit) // Rate limiting per organization
 
 	// Public routes
 	r.Get("/health", handlers.Health)
@@ -179,19 +184,36 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// corsMiddleware adds CORS headers for local development
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3005")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+// corsMiddleware returns a middleware that adds CORS headers allowing only the given origins
+func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
+	// Build a quick lookup map for allowed origins
+	originAllowed := make(map[string]struct{}, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		originAllowed[o] = struct{}{}
+	}
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
 
-		next.ServeHTTP(w, r)
-	})
+			// Only set CORS for allowed origins
+			if origin != "" {
+				if _, ok := originAllowed[origin]; ok {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				}
+			}
+
+			// Handle preflight requests early
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
