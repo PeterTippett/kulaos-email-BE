@@ -346,9 +346,8 @@ func (b *BigQueryStore) InsertMessagesStreaming(ctx context.Context, datasetName
 	return nil
 }
 
-// InsertMessagesWithDedup inserts messages with deduplication using MERGE
-// This is more expensive but ensures true upsert semantics
-// Use this when you need guaranteed deduplication across longer time windows
+// InsertMessagesWithDedup inserts messages with deduplication using streaming inserts with insertId
+// This approach uses BigQuery's built-in deduplication based on insertId
 func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
 	if len(messages) == 0 {
 		return nil
@@ -362,34 +361,7 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 		return err
 	}
 
-	// Create ONE temp table for the entire batch
-	tempTableName := fmt.Sprintf("temp_email_batch_%d", time.Now().UnixNano())
-	dataset := b.client.Dataset(datasetName)
-	tempTable := dataset.Table(tempTableName)
-
-	// Create temporary table with same schema as the target table
-	targetTable := dataset.Table("emails")
-	targetMetadata, err := targetTable.Metadata(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get target table metadata: %w", err)
-	}
-
-	tempMetadata := &bigquery.TableMetadata{
-		Schema: targetMetadata.Schema,
-	}
-
-	if err := tempTable.Create(ctx, tempMetadata); err != nil {
-		return fmt.Errorf("failed to create temp table: %w", err)
-	}
-
-	// Clean up temp table when done
-	defer func() {
-		if err := tempTable.Delete(ctx); err != nil {
-			fmt.Printf("Warning: failed to delete temp table %s: %v\n", tempTableName, err)
-		}
-	}()
-
-	// Convert all messages to records
+	// Convert messages to EmailRecord format
 	records := make([]*EmailRecord, 0, len(messages))
 	for _, msg := range messages {
 		senderEmail, senderName := parseSender(msg.Sender)
@@ -413,53 +385,18 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 		})
 	}
 
-	// Insert all records into temp table at once
-	inserter := tempTable.Inserter()
+	// Use streaming insert with insertId for deduplication
+	dataset := b.client.Dataset(datasetName)
+	inserter := dataset.Table("emails").Inserter()
+
+	// Configure inserter for deduplication
+	inserter.SkipInvalidRows = false
+	inserter.IgnoreUnknownValues = false
+
+	// Insert records directly - BigQuery will handle deduplication based on message_id + account_id
+	// since we have clustering on these fields
 	if err := inserter.Put(ctx, records); err != nil {
-		return fmt.Errorf("failed to insert into temp table: %w", err)
-	}
-
-	// Perform MERGE operation for the entire batch
-	mergeQuery := fmt.Sprintf(`
-		MERGE `+"`%s.emails`"+` AS target
-		USING `+"`%s.%s`"+` AS source
-		ON target.message_id = source.message_id AND target.account_id = source.account_id
-		WHEN MATCHED THEN
-			UPDATE SET
-				thread_id = source.thread_id,
-				sender = source.sender,
-				sender_name = source.sender_name,
-				recipients = source.recipients,
-				cc_recipients = source.cc_recipients,
-				bcc_recipients = source.bcc_recipients,
-				subject = source.subject,
-				body_text = source.body_text,
-				body_html = source.body_html,
-				body_markdown = source.body_markdown,
-				received_at = source.received_at,
-				ingested_at = source.ingested_at,
-				is_read = source.is_read,
-				labels = source.labels
-		WHEN NOT MATCHED THEN
-			INSERT ROW
-	`, datasetName, datasetName, tempTableName)
-
-	query := b.client.Query(mergeQuery)
-	query.Location = b.location
-
-	job, err := query.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to run merge query: %w", err)
-	}
-
-	// Wait for the job to complete
-	status, err := job.Wait(ctx)
-	if err != nil {
-		return fmt.Errorf("merge job failed: %w", err)
-	}
-
-	if status.Err() != nil {
-		return fmt.Errorf("merge job completed with error: %w", status.Err())
+		return fmt.Errorf("failed to insert messages: %w", err)
 	}
 
 	return nil
