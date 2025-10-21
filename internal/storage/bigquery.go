@@ -346,8 +346,8 @@ func (b *BigQueryStore) InsertMessagesStreaming(ctx context.Context, datasetName
 	return nil
 }
 
-// InsertMessagesWithDedup inserts messages with deduplication using streaming inserts with insertId
-// This approach uses BigQuery's built-in deduplication based on insertId
+// InsertMessagesWithDedup inserts messages with manual deduplication
+// This approach checks for existing emails before inserting each one individually
 func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
 	if len(messages) == 0 {
 		return nil
@@ -361,11 +361,24 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 		return err
 	}
 
-	// Convert messages to EmailRecord format
-	records := make([]*EmailRecord, 0, len(messages))
+	// Process each message individually
 	for _, msg := range messages {
 		senderEmail, senderName := parseSender(msg.Sender)
-		records = append(records, &EmailRecord{
+
+		// First, check if this email already exists
+		exists, err := b.emailExists(ctx, datasetName, msg.MessageID, accountID)
+		if err != nil {
+			return fmt.Errorf("failed to check if email exists for message %s: %w", msg.MessageID, err)
+		}
+
+		// If email already exists, skip it
+		if exists {
+			fmt.Printf("⚠️  Skipping duplicate email: %s (account: %s)\n", msg.MessageID, accountID)
+			continue
+		}
+
+		// Create EmailRecord
+		record := &EmailRecord{
 			MessageID:     msg.MessageID,
 			ThreadID:      msg.ThreadID,
 			AccountID:     accountID,
@@ -382,21 +395,62 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 			IngestedAt:    time.Now(),
 			IsRead:        msg.IsRead,
 			Labels:        msg.Labels,
-		})
+		}
+
+		// Insert single record
+		if err := b.insertSingleEmail(ctx, datasetName, record); err != nil {
+			return fmt.Errorf("failed to insert email %s: %w", msg.MessageID, err)
+		}
+
+		fmt.Printf("✅ Inserted email: %s (account: %s)\n", msg.MessageID, accountID)
 	}
 
-	// Use streaming insert with insertId for deduplication
+	return nil
+}
+
+// emailExists checks if an email with the given messageID and accountID already exists
+func (b *BigQueryStore) emailExists(ctx context.Context, datasetName, messageID, accountID string) (bool, error) {
+	query := b.client.Query(fmt.Sprintf(`
+		SELECT COUNT(*) as count
+		FROM `+"`%s.emails`"+`
+		WHERE message_id = @message_id AND account_id = @account_id
+	`, datasetName))
+
+	query.Location = b.location
+	query.Parameters = []bigquery.QueryParameter{
+		{Name: "message_id", Value: messageID},
+		{Name: "account_id", Value: accountID},
+	}
+
+	it, err := query.Read(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to query email existence: %w", err)
+	}
+
+	var count int64
+	var row struct {
+		Count int64 `bigquery:"count"`
+	}
+	err = it.Next(&row)
+	if err == nil {
+		count = row.Count
+	}
+
+	return count > 0, nil
+}
+
+// insertSingleEmail inserts a single email record into BigQuery
+func (b *BigQueryStore) insertSingleEmail(ctx context.Context, datasetName string, record *EmailRecord) error {
 	dataset := b.client.Dataset(datasetName)
 	inserter := dataset.Table("emails").Inserter()
 
-	// Configure inserter for deduplication
+	// Configure inserter
 	inserter.SkipInvalidRows = false
 	inserter.IgnoreUnknownValues = false
 
-	// Insert records directly - BigQuery will handle deduplication based on message_id + account_id
-	// since we have clustering on these fields
-	if err := inserter.Put(ctx, records); err != nil {
-		return fmt.Errorf("failed to insert messages: %w", err)
+	// Insert single record
+	if err := inserter.Put(ctx, record); err != nil {
+		return fmt.Errorf("failed to insert record: %w", err)
 	}
 
 	return nil
