@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -477,4 +478,105 @@ func (h *Handlers) refreshAccountWatch(ctx context.Context, account *datastore.E
 
 	fmt.Printf("✅ Refreshed watch for %s - new expiration: %v\n", account.EmailAddress, watchResp.Expiration)
 	return nil
+}
+
+// SendEmailRequest represents the request body for sending an email
+type SendEmailRequest struct {
+	AccountID string `json:"account_id"`
+	To        string `json:"to"`
+	Subject   string `json:"subject"`
+	Body      string `json:"body"`
+}
+
+// SendEmail handles sending emails via connected Gmail accounts
+func (h *Handlers) SendEmail(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	orgID := auth.GetOrgID(ctx)
+
+	if orgID == "" {
+		http.Error(w, "organization ID not found", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var req SendEmailRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.AccountID == "" || req.To == "" || req.Subject == "" || req.Body == "" {
+		http.Error(w, "missing required fields: account_id, to, subject, body", http.StatusBadRequest)
+		return
+	}
+
+	// Basic email format validation
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	if !emailRegex.MatchString(req.To) {
+		http.Error(w, "invalid email format", http.StatusBadRequest)
+		return
+	}
+
+	// Get tenant
+	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
+	if err != nil {
+		logger.FromContext(ctx).Error("Failed to get tenant",
+			zap.String("org_id", orgID),
+			zap.Error(err))
+		http.Error(w, "tenant not found", http.StatusNotFound)
+		return
+	}
+
+	// Get account with decrypted tokens
+	account, err := h.accountStore.GetAccountWithDecryptedTokens(ctx, tenant.Namespace, orgID, req.AccountID)
+	if err != nil {
+		logger.FromContext(ctx).Error("Failed to get account",
+			zap.String("account_id", req.AccountID),
+			zap.Error(err))
+		http.Error(w, "account not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify account belongs to the org
+	if account.OrgID != orgID {
+		logger.FromContext(ctx).Warn("Account does not belong to organization",
+			zap.String("account_id", req.AccountID),
+			zap.String("account_org", account.OrgID),
+			zap.String("request_org", orgID))
+		http.Error(w, "account not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify account is active
+	if account.Status != "active" {
+		logger.FromContext(ctx).Warn("Account is not active",
+			zap.String("account_id", req.AccountID),
+			zap.String("status", account.Status))
+		http.Error(w, "account is not active", http.StatusBadRequest)
+		return
+	}
+
+	// Send email via Gmail API
+	if err := h.gmailClient.SendEmail(ctx, account.AccessToken, account.RefreshToken, req.To, req.Subject, req.Body); err != nil {
+		logger.FromContext(ctx).Error("Failed to send email",
+			zap.String("account_id", req.AccountID),
+			zap.String("to", req.To),
+			zap.Error(err))
+		http.Error(w, "failed to send email", http.StatusInternalServerError)
+		return
+	}
+
+	logger.FromContext(ctx).Info("Successfully sent email",
+		zap.String("account_id", req.AccountID),
+		zap.String("to", req.To),
+		zap.String("subject", req.Subject))
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Email sent successfully",
+	})
 }

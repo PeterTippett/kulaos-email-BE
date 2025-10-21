@@ -2,6 +2,7 @@ package gmail
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -214,6 +215,38 @@ func (g *GmailClient) FetchNewMessagesPaged(ctx context.Context, accessToken, re
 	}
 
 	return allMessages, latestHistoryID, nil
+}
+
+// SendEmail sends an email via Gmail API
+func (g *GmailClient) SendEmail(ctx context.Context, accessToken, refreshToken, to, subject, body string) error {
+	fmt.Printf("🔄 [GMAIL] Sending email to %s with subject: %s\n", to, subject)
+
+	// Use TokenSource which automatically handles token refresh
+	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
+	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
+	if err != nil {
+		return fmt.Errorf("failed to create gmail service: %w", err)
+	}
+
+	// Construct raw RFC 2822 email message
+	rawMessage := fmt.Sprintf("To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, body)
+
+	// Base64 encode the message
+	encodedMessage := base64.StdEncoding.EncodeToString([]byte(rawMessage))
+
+	// Create the message
+	message := &gmail.Message{
+		Raw: encodedMessage,
+	}
+
+	// Send the email
+	_, err = gmailService.Users.Messages.Send("me", message).Do()
+	if err != nil {
+		return fmt.Errorf("failed to send email: %w", err)
+	}
+
+	fmt.Printf("✅ [GMAIL] Successfully sent email to %s\n", to)
+	return nil
 }
 
 // StopWatch stops Gmail push notifications for an account

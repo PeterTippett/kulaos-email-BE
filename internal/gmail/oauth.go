@@ -22,6 +22,7 @@ func NewGmailOAuth(clientID, clientSecret, redirectURI string) *GmailOAuth {
 		RedirectURL:  redirectURI,
 		Scopes: []string{
 			gmail.GmailModifyScope,
+			gmail.GmailSendScope,
 		},
 		Endpoint: google.Endpoint,
 	}

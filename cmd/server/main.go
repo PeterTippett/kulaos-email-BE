@@ -119,6 +119,7 @@ func main() {
 		r.Get("/auth/gmail/start", handlers.StartGmailAuth)
 		r.Get("/api/accounts", handlers.ListAccounts)
 		r.Get("/api/emails", handlers.ListEmails)
+		r.Post("/api/emails/send", handlers.SendEmail)
 		r.Delete("/api/accounts/{accountID}", handlers.DeleteAccount)
 	})
 
