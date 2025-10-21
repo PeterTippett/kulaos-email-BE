@@ -283,11 +283,17 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 	return nil
 }
 
-// InsertMessages inserts multiple email messages into BigQuery using streaming inserts
-// Note: Streaming inserts do not support deduplication, so the application should
-// handle duplicate prevention if necessary. BigQuery will deduplicate based on insertId
-// within a limited time window.
+// InsertMessages inserts multiple email messages into BigQuery with deduplication
+// This method now uses MERGE operations to prevent duplicates by default
 func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
+	// Use the deduplication method by default to prevent duplicates
+	return b.InsertMessagesWithDedup(ctx, datasetName, messages, accountID)
+}
+
+// InsertMessagesStreaming inserts multiple email messages using streaming inserts
+// WARNING: This method does NOT prevent duplicates and should only be used for
+// high-volume scenarios where duplicates are acceptable or handled elsewhere
+func (b *BigQueryStore) InsertMessagesStreaming(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
 	if len(messages) == 0 {
 		return nil
 	}
