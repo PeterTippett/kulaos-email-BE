@@ -32,19 +32,22 @@ func NewBigQueryStore(ctx context.Context, projectID, location string) (*BigQuer
 }
 
 type EmailRecord struct {
-	MessageID    string    `bigquery:"message_id"`
-	ThreadID     string    `bigquery:"thread_id"`
-	AccountID    string    `bigquery:"account_id"`
-	Sender       string    `bigquery:"sender"`
-	SenderName   string    `bigquery:"sender_name"`
-	Subject      string    `bigquery:"subject"`
-	BodyText     string    `bigquery:"body_text"`
-	BodyHTML     string    `bigquery:"body_html"`
-	BodyMarkdown string    `bigquery:"body_markdown"`
-	ReceivedAt   time.Time `bigquery:"received_at"`
-	IngestedAt   time.Time `bigquery:"ingested_at"`
-	IsRead       bool      `bigquery:"is_read"`
-	Labels       []string  `bigquery:"labels"`
+	MessageID     string    `bigquery:"message_id"`
+	ThreadID      string    `bigquery:"thread_id"`
+	AccountID     string    `bigquery:"account_id"`
+	Sender        string    `bigquery:"sender"`
+	SenderName    string    `bigquery:"sender_name"`
+	Recipients    []string  `bigquery:"recipients"`
+	CCRecipients  []string  `bigquery:"cc_recipients"`
+	BCCRecipients []string  `bigquery:"bcc_recipients"`
+	Subject       string    `bigquery:"subject"`
+	BodyText      string    `bigquery:"body_text"`
+	BodyHTML      string    `bigquery:"body_html"`
+	BodyMarkdown  string    `bigquery:"body_markdown"`
+	ReceivedAt    time.Time `bigquery:"received_at"`
+	IngestedAt    time.Time `bigquery:"ingested_at"`
+	IsRead        bool      `bigquery:"is_read"`
+	Labels        []string  `bigquery:"labels"`
 }
 
 // parseSender extracts the name and email from a sender string
@@ -106,6 +109,9 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 		hasBodyHTML := false
 		hasBodyMarkdown := false
 		hasSenderName := false
+		hasRecipients := false
+		hasCCRecipients := false
+		hasBCCRecipients := false
 		messageIDRequired := false
 		hasClustering := false
 
@@ -119,6 +125,15 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 			if f.Name == "sender_name" {
 				hasSenderName = true
 			}
+			if f.Name == "recipients" {
+				hasRecipients = true
+			}
+			if f.Name == "cc_recipients" {
+				hasCCRecipients = true
+			}
+			if f.Name == "bcc_recipients" {
+				hasBCCRecipients = true
+			}
 			if f.Name == "message_id" && f.Required {
 				messageIDRequired = true
 			}
@@ -130,11 +145,11 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 		}
 
 		// Add missing fields if needed
-		needsSchemaUpdate := !hasBodyHTML || !hasBodyMarkdown || !hasSenderName || !messageIDRequired
+		needsSchemaUpdate := !hasBodyHTML || !hasBodyMarkdown || !hasSenderName || !hasRecipients || !hasCCRecipients || !hasBCCRecipients || !messageIDRequired
 
 		if needsSchemaUpdate {
 			// Build new schema with all existing fields plus missing ones
-			newSchema := make(bigquery.Schema, 0, len(md.Schema)+3)
+			newSchema := make(bigquery.Schema, 0, len(md.Schema)+6)
 
 			// Copy existing fields, potentially updating message_id requirement
 			for _, field := range md.Schema {
@@ -171,6 +186,30 @@ func (b *BigQueryStore) EnsureEmailTable(ctx context.Context, datasetName string
 				newSchema = append(newSchema, &bigquery.FieldSchema{
 					Name:     "sender_name",
 					Type:     bigquery.StringFieldType,
+					Required: false,
+				})
+			}
+			if !hasRecipients {
+				newSchema = append(newSchema, &bigquery.FieldSchema{
+					Name:     "recipients",
+					Type:     bigquery.StringFieldType,
+					Repeated: true,
+					Required: false,
+				})
+			}
+			if !hasCCRecipients {
+				newSchema = append(newSchema, &bigquery.FieldSchema{
+					Name:     "cc_recipients",
+					Type:     bigquery.StringFieldType,
+					Repeated: true,
+					Required: false,
+				})
+			}
+			if !hasBCCRecipients {
+				newSchema = append(newSchema, &bigquery.FieldSchema{
+					Name:     "bcc_recipients",
+					Type:     bigquery.StringFieldType,
+					Repeated: true,
 					Required: false,
 				})
 			}
@@ -266,19 +305,22 @@ func (b *BigQueryStore) InsertMessages(ctx context.Context, datasetName string, 
 	for _, msg := range messages {
 		senderEmail, senderName := parseSender(msg.Sender)
 		records = append(records, &EmailRecord{
-			MessageID:    msg.MessageID,
-			ThreadID:     msg.ThreadID,
-			AccountID:    accountID,
-			Sender:       senderEmail,
-			SenderName:   senderName,
-			Subject:      msg.Subject,
-			BodyText:     msg.BodyText,
-			BodyHTML:     msg.BodyHTML,
-			BodyMarkdown: msg.BodyMarkdown,
-			ReceivedAt:   msg.ReceivedAt,
-			IngestedAt:   time.Now(),
-			IsRead:       msg.IsRead,
-			Labels:       msg.Labels,
+			MessageID:     msg.MessageID,
+			ThreadID:      msg.ThreadID,
+			AccountID:     accountID,
+			Sender:        senderEmail,
+			SenderName:    senderName,
+			Recipients:    msg.Recipients,
+			CCRecipients:  msg.CCRecipients,
+			BCCRecipients: msg.BCCRecipients,
+			Subject:       msg.Subject,
+			BodyText:      msg.BodyText,
+			BodyHTML:      msg.BodyHTML,
+			BodyMarkdown:  msg.BodyMarkdown,
+			ReceivedAt:    msg.ReceivedAt,
+			IngestedAt:    time.Now(),
+			IsRead:        msg.IsRead,
+			Labels:        msg.Labels,
 		})
 	}
 
@@ -346,19 +388,22 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 	for _, msg := range messages {
 		senderEmail, senderName := parseSender(msg.Sender)
 		records = append(records, &EmailRecord{
-			MessageID:    msg.MessageID,
-			ThreadID:     msg.ThreadID,
-			AccountID:    accountID,
-			Sender:       senderEmail,
-			SenderName:   senderName,
-			Subject:      msg.Subject,
-			BodyText:     msg.BodyText,
-			BodyHTML:     msg.BodyHTML,
-			BodyMarkdown: msg.BodyMarkdown,
-			ReceivedAt:   msg.ReceivedAt,
-			IngestedAt:   time.Now(),
-			IsRead:       msg.IsRead,
-			Labels:       msg.Labels,
+			MessageID:     msg.MessageID,
+			ThreadID:      msg.ThreadID,
+			AccountID:     accountID,
+			Sender:        senderEmail,
+			SenderName:    senderName,
+			Recipients:    msg.Recipients,
+			CCRecipients:  msg.CCRecipients,
+			BCCRecipients: msg.BCCRecipients,
+			Subject:       msg.Subject,
+			BodyText:      msg.BodyText,
+			BodyHTML:      msg.BodyHTML,
+			BodyMarkdown:  msg.BodyMarkdown,
+			ReceivedAt:    msg.ReceivedAt,
+			IngestedAt:    time.Now(),
+			IsRead:        msg.IsRead,
+			Labels:        msg.Labels,
 		})
 	}
 
@@ -378,6 +423,9 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 				thread_id = source.thread_id,
 				sender = source.sender,
 				sender_name = source.sender_name,
+				recipients = source.recipients,
+				cc_recipients = source.cc_recipients,
+				bcc_recipients = source.bcc_recipients,
 				subject = source.subject,
 				body_text = source.body_text,
 				body_html = source.body_html,
@@ -420,6 +468,9 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 			account_id,
 			sender,
 			sender_name,
+			recipients,
+			cc_recipients,
+			bcc_recipients,
 			subject,
 			body_text,
 			body_html,

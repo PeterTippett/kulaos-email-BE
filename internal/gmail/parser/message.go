@@ -25,6 +25,12 @@ func ParseMessage(msg *gmail.Message) (*types.EmailMessage, error) {
 		switch header.Name {
 		case "From":
 			emailMsg.Sender = header.Value
+		case "To":
+			emailMsg.Recipients = parseEmailList(header.Value)
+		case "Cc":
+			emailMsg.CCRecipients = parseEmailList(header.Value)
+		case "Bcc":
+			emailMsg.BCCRecipients = parseEmailList(header.Value)
 		case "Subject":
 			emailMsg.Subject = header.Value
 		case "Date":
@@ -57,6 +63,34 @@ func ParseMessage(msg *gmail.Message) (*types.EmailMessage, error) {
 	}
 
 	return emailMsg, nil
+}
+
+// parseEmailList parses a comma-separated list of email addresses
+// Handles formats like "Name <email@example.com>, email2@example.com"
+func parseEmailList(emailList string) []string {
+	if emailList == "" {
+		return []string{}
+	}
+
+	var emails []string
+	// Split by comma and clean up each email
+	for _, email := range strings.Split(emailList, ",") {
+		email = strings.TrimSpace(email)
+		if email == "" {
+			continue
+		}
+
+		// Extract email from "Name <email@example.com>" format
+		if idx := strings.Index(email, "<"); idx != -1 {
+			if endIdx := strings.Index(email[idx:], ">"); endIdx != -1 {
+				email = strings.TrimSpace(email[idx+1 : idx+endIdx])
+			}
+		}
+
+		emails = append(emails, email)
+	}
+
+	return emails
 }
 
 // ParseBody extracts text and HTML content from message payload
