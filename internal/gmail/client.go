@@ -217,12 +217,15 @@ func (g *GmailClient) FetchNewMessagesPaged(ctx context.Context, accessToken, re
 	return allMessages, latestHistoryID, nil
 }
 
-// SendEmail sends an email via Gmail API
-func (g *GmailClient) SendEmail(ctx context.Context, accessToken, refreshToken, to, subject, body string) error {
-	fmt.Printf("🔄 [GMAIL] Sending email to %s with subject: %s\n", to, subject)
+// SendEmail sends an email via Gmail API with automatic token refresh
+// This method handles expired tokens by:
+// 1. Accepting the token expiry time to pass to the OAuth2 library
+// 2. Using a callback to persist refreshed tokens back to the database
+func (g *GmailClient) SendEmail(ctx context.Context, accessToken, refreshToken, to, subject, body string, expiry time.Time, callback TokenRefreshCallback) error {
+	fmt.Printf("🔄 [GMAIL] Sending email to %s with subject: %s (with callback and expiry)\n", to, subject)
 
-	// Use TokenSource which automatically handles token refresh
-	ts := g.oauth.GetTokenSource(ctx, accessToken, refreshToken)
+	// Use TokenSource with callback and expiry to handle token refresh
+	ts := g.oauth.GetTokenSourceWithCallbackAndExpiry(ctx, accessToken, refreshToken, expiry, callback)
 	gmailService, err := gmail.NewService(ctx, option.WithTokenSource(ts))
 	if err != nil {
 		return fmt.Errorf("failed to create gmail service: %w", err)

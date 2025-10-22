@@ -17,10 +17,19 @@ Authorization: Bearer <your-jwt-token>
 
 ## Rate Limiting
 
+### General API Rate Limiting
+
 - **Rate**: 10 requests per second per organization
 - **Burst**: 20 requests
 - **Scope**: Per-organization (isolated)
 - **Response**: `429 Too Many Requests` when exceeded
+
+### Email Send Rate Limiting
+
+- **Rate**: 1 email per 5 seconds per organization
+- **Scope**: Per-organization (isolated)
+- **Response**: `429 Too Many Requests` with `Retry-After` header when exceeded
+- **Note**: This is in addition to the general API rate limiting
 
 ## Endpoints Overview
 
@@ -339,6 +348,9 @@ Sends an email using a connected Gmail account.
   - Organization ID not found
   - Account not found or not active
 - **404 Not Found**: Account or tenant not found
+- **429 Too Many Requests**:
+  - Email send rate limit exceeded (1 email per 5 seconds)
+  - Includes `Retry-After` header with seconds to wait
 - **500 Internal Server Error**: Failed to send email
 
 ---
@@ -416,12 +428,25 @@ All endpoints may return the following error responses:
 
 ### 429 Too Many Requests
 
+**General API Rate Limit:**
+
 ```json
 {
   "error": "Too Many Requests",
   "message": "Rate limit exceeded"
 }
 ```
+
+**Email Send Rate Limit:**
+
+```json
+{
+  "error": "Too Many Requests",
+  "message": "email send rate limit exceeded - please wait before sending another email"
+}
+```
+
+_Headers: `Retry-After: 3` (seconds remaining)_
 
 ### 500 Internal Server Error
 
@@ -491,11 +516,21 @@ All endpoints may return the following error responses:
 
 ## Rate Limiting Details
 
+### General API Rate Limiting
+
 - **Algorithm**: Token bucket with sliding window
 - **Scope**: Per-organization (isolated between organizations)
 - **Storage**: In-memory (⚠️ **Note**: Not distributed across App Engine instances)
 - **Headers**: No rate limit headers returned
 - **Retry**: Clients should implement exponential backoff
+
+### Email Send Rate Limiting
+
+- **Algorithm**: Simple time-based (last sent timestamp)
+- **Scope**: Per-organization (isolated between organizations)
+- **Storage**: In-memory (⚠️ **Note**: Not distributed across App Engine instances)
+- **Headers**: `Retry-After` header with seconds remaining
+- **Retry**: Clients should wait for the time specified in `Retry-After` header
 
 ## CORS Configuration
 
@@ -549,7 +584,7 @@ curl -X POST "https://kulaos-email-prod.ts.r.appspot.com/api/emails/send" \
 ### Error Handling
 
 ```bash
-# Rate limit exceeded
+# General API rate limit exceeded
 curl -X GET "https://kulaos-email-prod.ts.r.appspot.com/api/accounts" \
   -H "Authorization: Bearer <jwt-token>"
 
@@ -557,6 +592,19 @@ curl -X GET "https://kulaos-email-prod.ts.r.appspot.com/api/accounts" \
 # {
 #   "error": "Too Many Requests",
 #   "message": "Rate limit exceeded"
+# }
+
+# Email send rate limit exceeded
+curl -X POST "https://kulaos-email-prod.ts.r.appspot.com/api/emails/send" \
+  -H "Authorization: Bearer <jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"account_id": "...", "to": "...", "subject": "...", "body": "..."}'
+
+# Response: 429 Too Many Requests
+# Headers: Retry-After: 7
+# {
+#   "error": "Too Many Requests",
+#   "message": "email send rate limit exceeded - please wait before sending another email"
 # }
 ```
 

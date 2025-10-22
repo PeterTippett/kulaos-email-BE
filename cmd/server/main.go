@@ -83,8 +83,8 @@ func main() {
 	// Initialize API handlers
 	handlers := api.NewHandlers(kindeAuth, gmailOAuth, gmailClient, tenantStore, accountStore, bqStore, cfg.ProjectID, cfg.PubSubTopic, cfg.FrontendBaseURL)
 
-	// Initialize rate limiter (10 requests per second, burst of 20)
-	rateLimiter := internalMiddleware.NewRateLimiter(10, 20)
+	// Initialize email send rate limiter (once every 5 seconds)
+	emailSendRateLimiter := internalMiddleware.NewEmailSendRateLimiter(5 * time.Second)
 
 	// Setup chi router with middleware chain
 	r := chi.NewRouter()
@@ -101,7 +101,6 @@ func main() {
 		allowedOrigins = append(allowedOrigins, cfg.FrontendBaseURL)
 	}
 	r.Use(corsMiddleware(allowedOrigins))
-	r.Use(rateLimiter.Limit) // Rate limiting per organization
 
 	// Public routes
 	r.Get("/health", handlers.Health)
@@ -119,8 +118,14 @@ func main() {
 		r.Get("/auth/gmail/start", handlers.StartGmailAuth)
 		r.Get("/api/accounts", handlers.ListAccounts)
 		r.Get("/api/emails", handlers.ListEmails)
-		r.Post("/api/emails/send", handlers.SendEmail)
 		r.Delete("/api/accounts/{accountID}", handlers.DeleteAccount)
+	})
+
+	// Email send endpoint with authentication and rate limiting
+	r.Group(func(r chi.Router) {
+		r.Use(kindeAuth.Middleware)
+		r.Use(emailSendRateLimiter.Limit)
+		r.Post("/api/emails/send", handlers.SendEmail)
 	})
 
 	// Create server

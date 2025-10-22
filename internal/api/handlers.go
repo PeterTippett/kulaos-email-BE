@@ -558,8 +558,24 @@ func (h *Handlers) SendEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send email via Gmail API
-	if err := h.gmailClient.SendEmail(ctx, account.AccessToken, account.RefreshToken, req.To, req.Subject, req.Body); err != nil {
+	// Send email via Gmail API with token refresh callback
+	callback := func(newAccessToken, newRefreshToken string, expiry time.Time) {
+		logger.FromContext(ctx).Info("Token refresh callback triggered for account",
+			zap.String("account_id", req.AccountID),
+			zap.Time("expiry", expiry))
+
+		// Update the account with new tokens
+		if err := h.accountStore.UpdateTokens(ctx, tenant.Namespace, orgID, req.AccountID, newAccessToken, newRefreshToken, expiry); err != nil {
+			logger.FromContext(ctx).Error("Failed to update tokens after refresh",
+				zap.String("account_id", req.AccountID),
+				zap.Error(err))
+		} else {
+			logger.FromContext(ctx).Info("Successfully updated tokens after refresh",
+				zap.String("account_id", req.AccountID))
+		}
+	}
+
+	if err := h.gmailClient.SendEmail(ctx, account.AccessToken, account.RefreshToken, req.To, req.Subject, req.Body, *account.TokenExpiry, callback); err != nil {
 		logger.FromContext(ctx).Error("Failed to send email",
 			zap.String("account_id", req.AccountID),
 			zap.String("to", req.To),

@@ -109,6 +109,24 @@ func (g *GmailOAuth) GetTokenSourceWithCallback(ctx context.Context, accessToken
 	token := &oauth2.Token{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
+		// Don't set Expiry here - let the OAuth2 library handle it
+	}
+
+	baseTokenSource := g.config.TokenSource(ctx, token)
+
+	// Wrap the TokenSource to detect when tokens are refreshed
+	return oauth2.ReuseTokenSource(token, &callbackTokenSource{
+		base:     baseTokenSource,
+		callback: callback,
+	})
+}
+
+// GetTokenSourceWithCallbackAndExpiry creates a TokenSource with explicit expiry that calls a callback when tokens are refreshed
+func (g *GmailOAuth) GetTokenSourceWithCallbackAndExpiry(ctx context.Context, accessToken, refreshToken string, expiry time.Time, callback TokenRefreshCallback) oauth2.TokenSource {
+	token := &oauth2.Token{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		Expiry:       expiry,
 	}
 
 	baseTokenSource := g.config.TokenSource(ctx, token)
