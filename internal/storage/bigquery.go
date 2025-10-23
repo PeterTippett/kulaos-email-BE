@@ -478,7 +478,68 @@ func (b *BigQueryStore) insertSingleEmail(ctx context.Context, datasetName strin
 }
 
 // ListEmails retrieves recent emails for a tenant
+// EmailListResult contains paginated email results
+type EmailListResult struct {
+	Emails     []*EmailRecord
+	Total      int
+	Page       int
+	PerPage    int
+	TotalPages int
+}
+
 func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limit int) ([]*EmailRecord, error) {
+	result, err := b.ListEmailsPaginated(ctx, datasetName, 1, limit)
+	if err != nil {
+		return nil, err
+	}
+	return result.Emails, nil
+}
+
+func (b *BigQueryStore) ListEmailsPaginated(ctx context.Context, datasetName string, page, perPage int) (*EmailListResult, error) {
+	// Validate pagination parameters
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 50 // default
+	}
+
+	offset := (page - 1) * perPage
+
+	// First, get total count
+	countQuery := b.client.Query(fmt.Sprintf(`
+		SELECT COUNT(*) as total
+		FROM `+"`%s.emails`"+`
+	`, datasetName))
+	countQuery.Location = b.location
+
+	countIt, err := countQuery.Read(ctx)
+	if err != nil {
+		// If dataset or table doesn't exist yet, return empty result
+		if strings.Contains(err.Error(), "Not found") || strings.Contains(err.Error(), "notFound") {
+			return &EmailListResult{
+				Emails:     []*EmailRecord{},
+				Total:      0,
+				Page:       page,
+				PerPage:    perPage,
+				TotalPages: 0,
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to count emails: %w", err)
+	}
+
+	var countResult struct {
+		Total int64 `bigquery:"total"`
+	}
+	err = countIt.Next(&countResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read count: %w", err)
+	}
+
+	total := int(countResult.Total)
+	totalPages := (total + perPage - 1) / perPage
+
+	// Now get the paginated results
 	query := b.client.Query(fmt.Sprintf(`
 		SELECT 
 			message_id,
@@ -499,17 +560,23 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 			labels
 		FROM `+"`%s.emails`"+`
 		ORDER BY received_at DESC
-		LIMIT %d
-	`, datasetName, limit))
+		LIMIT %d OFFSET %d
+	`, datasetName, perPage, offset))
 
 	// Set the query location to match where datasets are created
 	query.Location = b.location
 
 	it, err := query.Read(ctx)
 	if err != nil {
-		// If dataset or table doesn't exist yet, return empty list
+		// If dataset or table doesn't exist yet, return empty result
 		if strings.Contains(err.Error(), "Not found") || strings.Contains(err.Error(), "notFound") {
-			return []*EmailRecord{}, nil
+			return &EmailListResult{
+				Emails:     []*EmailRecord{},
+				Total:      0,
+				Page:       page,
+				PerPage:    perPage,
+				TotalPages: 0,
+			}, nil
 		}
 		return nil, fmt.Errorf("failed to query: %w", err)
 	}
@@ -524,7 +591,13 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 		emails = append(emails, &record)
 	}
 
-	return emails, nil
+	return &EmailListResult{
+		Emails:     emails,
+		Total:      total,
+		Page:       page,
+		PerPage:    perPage,
+		TotalPages: totalPages,
+	}, nil
 }
 
 // EnsureSMSTable creates the sms_messages table if it doesn't exist

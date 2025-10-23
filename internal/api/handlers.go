@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,7 +277,7 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListEmails returns recent emails for the authenticated org
+// ListEmails returns recent emails for the authenticated org with pagination
 func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -287,27 +288,55 @@ func (h *Handlers) ListEmails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse pagination parameters
+	page := 1
+	perPage := 20 // default per page
+
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	if perPageStr := r.URL.Query().Get("per_page"); perPageStr != "" {
+		if pp, err := strconv.Atoi(perPageStr); err == nil && pp > 0 && pp <= 100 {
+			perPage = pp
+		}
+	}
+
 	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"emails": []interface{}{},
+			"emails":      []interface{}{},
+			"total":       0,
+			"page":        page,
+			"per_page":    perPage,
+			"total_pages": 0,
 		})
 		return
 	}
 
-	// Query BigQuery for recent emails
-	emails, err := h.bqStore.ListEmails(ctx, tenant.BigQueryDataset, 50)
+	// Query BigQuery for paginated emails
+	result, err := h.bqStore.ListEmailsPaginated(ctx, tenant.BigQueryDataset, page, perPage)
 	if err != nil {
 		logger.FromContext(ctx).Warn("Failed to list emails", zap.Error(err))
 		// Return empty list if dataset doesn't exist yet
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"emails": []interface{}{},
+			"emails":      []interface{}{},
+			"total":       0,
+			"page":        page,
+			"per_page":    perPage,
+			"total_pages": 0,
 		})
 		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"emails": emails,
+		"emails":      result.Emails,
+		"total":       result.Total,
+		"page":        result.Page,
+		"per_page":    result.PerPage,
+		"total_pages": result.TotalPages,
 	})
 }
 
