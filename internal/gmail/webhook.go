@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/api/gmail/v1"
@@ -25,6 +26,10 @@ type WebhookHandler struct {
 	accountStore *datastore.AccountStore
 	tenantStore  *datastore.TenantStore
 	bqStore      *storage.BigQueryStore
+
+	// Webhook deduplication cache
+	processingCache map[string]time.Time
+	cacheMutex      sync.RWMutex
 }
 
 func NewWebhookHandler(
@@ -34,10 +39,11 @@ func NewWebhookHandler(
 	bqStore *storage.BigQueryStore,
 ) *WebhookHandler {
 	return &WebhookHandler{
-		gmailClient:  gmailClient,
-		accountStore: accountStore,
-		tenantStore:  tenantStore,
-		bqStore:      bqStore,
+		gmailClient:     gmailClient,
+		accountStore:    accountStore,
+		tenantStore:     tenantStore,
+		bqStore:         bqStore,
+		processingCache: make(map[string]time.Time),
 	}
 }
 
@@ -88,6 +94,28 @@ func (h *WebhookHandler) HandleGmailWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	log.Printf("Received notification for email: %s, historyID: %d", notification.EmailAddress, notification.HistoryID)
+
+	// Create a unique key for this webhook notification
+	webhookKey := fmt.Sprintf("%s:%d", notification.EmailAddress, notification.HistoryID)
+
+	// Check if we're already processing this webhook
+	h.cacheMutex.Lock()
+	if lastProcessed, exists := h.processingCache[webhookKey]; exists {
+		// If processed within the last 30 seconds, skip to prevent duplicates
+		if time.Since(lastProcessed) < 30*time.Second {
+			h.cacheMutex.Unlock()
+			fmt.Printf("⚠️  Skipping duplicate webhook notification: %s (processed %v ago)\n", webhookKey, time.Since(lastProcessed))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
+	// Mark this webhook as being processed
+	h.processingCache[webhookKey] = time.Now()
+	h.cacheMutex.Unlock()
+
+	// Clean up old cache entries (older than 5 minutes)
+	go h.cleanupProcessingCache()
 
 	// Look up which tenant owns this email address
 	lookup, err := h.accountStore.GetAccountByEmail(ctx, notification.EmailAddress)
@@ -283,4 +311,17 @@ func (h *WebhookHandler) fetchMessagesWithService(ctx context.Context, gmailServ
 	}
 
 	return allMessages, latestHistoryID, nil
+}
+
+// cleanupProcessingCache removes old entries from the processing cache
+func (h *WebhookHandler) cleanupProcessingCache() {
+	h.cacheMutex.Lock()
+	defer h.cacheMutex.Unlock()
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for key, timestamp := range h.processingCache {
+		if timestamp.Before(cutoff) {
+			delete(h.processingCache, key)
+		}
+	}
 }

@@ -367,8 +367,8 @@ func (b *BigQueryStore) InsertMessagesStreaming(ctx context.Context, datasetName
 	return nil
 }
 
-// InsertMessagesWithDedup inserts messages with manual deduplication
-// This approach checks for existing emails before inserting each one individually
+// InsertMessagesWithDedup inserts messages with atomic deduplication using MERGE
+// This approach uses BigQuery MERGE to prevent duplicates at the database level
 func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName string, messages []*types.EmailMessage, accountID string) error {
 	if len(messages) == 0 {
 		return nil
@@ -382,24 +382,11 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 		return err
 	}
 
-	// Process each message individually
+	// Convert messages to EmailRecord format
+	records := make([]*EmailRecord, 0, len(messages))
 	for _, msg := range messages {
 		senderEmail, senderName := parseSender(msg.Sender)
-
-		// First, check if this email already exists
-		exists, err := b.emailExists(ctx, datasetName, msg.MessageID, accountID)
-		if err != nil {
-			return fmt.Errorf("failed to check if email exists for message %s: %w", msg.MessageID, err)
-		}
-
-		// If email already exists, skip it
-		if exists {
-			fmt.Printf("⚠️  Skipping duplicate email: %s (account: %s)\n", msg.MessageID, accountID)
-			continue
-		}
-
-		// Create EmailRecord
-		record := &EmailRecord{
+		records = append(records, &EmailRecord{
 			MessageID:     msg.MessageID,
 			ThreadID:      msg.ThreadID,
 			AccountID:     accountID,
@@ -416,15 +403,96 @@ func (b *BigQueryStore) InsertMessagesWithDedup(ctx context.Context, datasetName
 			IngestedAt:    time.Now(),
 			IsRead:        msg.IsRead,
 			Labels:        msg.Labels,
-		}
-
-		// Insert single record
-		if err := b.insertSingleEmail(ctx, datasetName, record); err != nil {
-			return fmt.Errorf("failed to insert email %s: %w", msg.MessageID, err)
-		}
-
-		fmt.Printf("✅ Inserted email: %s (account: %s)\n", msg.MessageID, accountID)
+		})
 	}
+
+	// Use MERGE statement for atomic deduplication
+	return b.insertMessagesWithMerge(ctx, datasetName, records, accountID)
+}
+
+// insertMessagesWithMerge uses BigQuery MERGE statement for atomic deduplication
+func (b *BigQueryStore) insertMessagesWithMerge(ctx context.Context, datasetName string, records []*EmailRecord, accountID string) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	// Create a temporary table for the new records
+	tempTableName := fmt.Sprintf("temp_emails_%d", time.Now().UnixNano())
+	tempTable := b.client.Dataset(datasetName).Table(tempTableName)
+
+	// Create temporary table with same schema as emails table
+	tempSchema, err := bigquery.InferSchema(EmailRecord{})
+	if err != nil {
+		return fmt.Errorf("failed to infer schema for temp table: %w", err)
+	}
+
+	tempMetadata := &bigquery.TableMetadata{
+		Schema: tempSchema,
+		TimePartitioning: &bigquery.TimePartitioning{
+			Field: "received_at",
+		},
+	}
+
+	if err := tempTable.Create(ctx, tempMetadata); err != nil {
+		return fmt.Errorf("failed to create temp table: %w", err)
+	}
+
+	// Clean up temp table when done
+	defer func() {
+		if err := tempTable.Delete(ctx); err != nil {
+			fmt.Printf("⚠️  Failed to delete temp table %s: %v\n", tempTableName, err)
+		}
+	}()
+
+	// Insert records into temporary table
+	inserter := tempTable.Inserter()
+	inserter.SkipInvalidRows = false
+	inserter.IgnoreUnknownValues = false
+
+	if err := inserter.Put(ctx, records); err != nil {
+		return fmt.Errorf("failed to insert records into temp table: %w", err)
+	}
+
+	// Build MERGE statement to insert only new records
+	mergeQuery := fmt.Sprintf(`
+		MERGE `+"`%s.emails`"+` AS target
+		USING `+"`%s.%s`"+` AS source
+		ON target.message_id = source.message_id AND target.account_id = source.account_id
+		WHEN NOT MATCHED THEN
+			INSERT (
+				message_id, thread_id, account_id, sender, sender_name,
+				recipients, cc_recipients, bcc_recipients, subject,
+				body_text, body_html, body_markdown, received_at, ingested_at,
+				is_read, labels
+			)
+			VALUES (
+				source.message_id, source.thread_id, source.account_id, source.sender, source.sender_name,
+				source.recipients, source.cc_recipients, source.bcc_recipients, source.subject,
+				source.body_text, source.body_html, source.body_markdown, source.received_at, source.ingested_at,
+				source.is_read, source.labels
+			)
+	`, datasetName, datasetName, tempTableName)
+
+	query := b.client.Query(mergeQuery)
+	query.Location = b.location
+
+	job, err := query.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to start MERGE job: %w", err)
+	}
+
+	// Wait for job to complete
+	status, err := job.Wait(ctx)
+	if err != nil {
+		return fmt.Errorf("MERGE job failed: %w", err)
+	}
+
+	if status.Err() != nil {
+		return fmt.Errorf("MERGE job error: %w", status.Err())
+	}
+
+	// Log successful insertions
+	fmt.Printf("✅ Inserted %d emails using MERGE (account: %s)\n", len(records), accountID)
 
 	return nil
 }
