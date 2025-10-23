@@ -109,7 +109,7 @@ grant_secret_manager_access() {
     print_status "Granting Secret Manager access to App Engine..."
     
     local app_engine_sa="$PROJECT_ID@appspot.gserviceaccount.com"
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
     
     for secret in "${secrets[@]}"; do
         print_status "Granting access to secret: $secret"
@@ -140,7 +140,7 @@ validate_config() {
     fi
     
     # Check if secrets exist in Secret Manager
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
     for secret in "${secrets[@]}"; do
         if ! gcloud secrets describe "$secret" &> /dev/null; then
             print_error "Secret $secret does not exist in Secret Manager."
@@ -201,9 +201,12 @@ show_next_steps() {
     print_status "Next steps:"
     echo "1. Update your Kinde OAuth redirect URI to: https://$(gcloud app describe --format='value(defaultHostname)')/api/auth/kinde/callback"
     echo "2. Update your Gmail OAuth redirect URI to: https://$(gcloud app describe --format='value(defaultHostname)')/auth/gmail/callback"
-    echo "3. Update your frontend configuration to use the new backend URL"
-    echo "4. Test the health endpoint: https://$(gcloud app describe --format='value(defaultHostname)')/health"
-    echo "5. Set up Cloud Scheduler for Gmail watch refresh (see infrastructure/gcloud/setup-cloud-scheduler.sh)"
+    echo "3. Update your Twilio webhook URLs in Twilio console:"
+    echo "   - Inbound SMS: https://$(gcloud app describe --format='value(defaultHostname)')/webhooks/{org_id}/twilio/sms"
+    echo "   - Note: Status callbacks are set automatically when sending SMS"
+    echo "4. Update your frontend configuration to use the new backend URL"
+    echo "5. Test the health endpoint: https://$(gcloud app describe --format='value(defaultHostname)')/health"
+    echo "6. Set up Cloud Scheduler for Gmail watch refresh (see infrastructure/gcloud/setup-cloud-scheduler.sh)"
     echo ""
     print_status "Secret Management:"
     echo "  List secrets: gcloud secrets list"

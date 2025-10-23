@@ -50,6 +50,27 @@ type EmailRecord struct {
 	Labels        []string  `bigquery:"labels"`
 }
 
+// SMSRecord represents an SMS message stored in BigQuery
+type SMSRecord struct {
+	MessageSID string    `bigquery:"message_sid" json:"message_sid"`
+	FromNumber string    `bigquery:"from_number" json:"from_number"`
+	ToNumber   string    `bigquery:"to_number" json:"to_number"`
+	Body       string    `bigquery:"body" json:"body"`
+	Direction  string    `bigquery:"direction" json:"direction"`
+	Status     string    `bigquery:"status" json:"status"`
+	ReceivedAt time.Time `bigquery:"received_at" json:"received_at"`
+	IngestedAt time.Time `bigquery:"ingested_at" json:"ingested_at"`
+	AccountID  string    `bigquery:"account_id" json:"account_id"`
+}
+
+// SMSStatusHistoryRecord represents a status change event for an SMS message
+type SMSStatusHistoryRecord struct {
+	MessageSID string    `bigquery:"message_sid"`
+	Status     string    `bigquery:"status"`
+	Timestamp  time.Time `bigquery:"timestamp"`
+	AccountID  string    `bigquery:"account_id"`
+}
+
 // parseSender extracts the name and email from a sender string
 // Format: "Name <email@example.com>" or just "email@example.com"
 func parseSender(sender string) (email, name string) {
@@ -504,6 +525,238 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 	}
 
 	return emails, nil
+}
+
+// EnsureSMSTable creates the sms_messages table if it doesn't exist
+func (b *BigQueryStore) EnsureSMSTable(ctx context.Context, datasetName string) error {
+	dataset := b.client.Dataset(datasetName)
+	table := dataset.Table("sms_messages")
+
+	// Check if table exists
+	_, err := table.Metadata(ctx)
+	if err == nil {
+		// Table already exists
+		return nil
+	}
+
+	// Infer schema from SMSRecord struct
+	schema, err := bigquery.InferSchema(SMSRecord{})
+	if err != nil {
+		return fmt.Errorf("failed to infer schema: %w", err)
+	}
+
+	// Make message_sid required for uniqueness
+	for _, field := range schema {
+		if field.Name == "message_sid" {
+			field.Required = true
+			break
+		}
+	}
+
+	metadata := &bigquery.TableMetadata{
+		Schema: schema,
+		TimePartitioning: &bigquery.TimePartitioning{
+			Field: "received_at",
+		},
+		Clustering: &bigquery.Clustering{
+			Fields: []string{"message_sid", "account_id"},
+		},
+	}
+
+	if err := table.Create(ctx, metadata); err != nil {
+		return fmt.Errorf("failed to create SMS table: %w", err)
+	}
+
+	return nil
+}
+
+// InsertSMSMessage inserts a single SMS message into BigQuery
+func (b *BigQueryStore) InsertSMSMessage(ctx context.Context, datasetName string, message *types.SMSMessage, accountID string) error {
+	// Ensure dataset and table exist
+	if err := b.CreateTenantDataset(ctx, datasetName); err != nil {
+		return err
+	}
+	if err := b.EnsureSMSTable(ctx, datasetName); err != nil {
+		return err
+	}
+
+	// Convert to SMSRecord
+	record := &SMSRecord{
+		MessageSID: message.MessageSID,
+		FromNumber: message.From,
+		ToNumber:   message.To,
+		Body:       message.Body,
+		Direction:  message.Direction,
+		Status:     message.Status,
+		ReceivedAt: message.ReceivedAt,
+		IngestedAt: time.Now(),
+		AccountID:  accountID,
+	}
+
+	// If ReceivedAt is zero, use SentAt (for outbound messages)
+	if record.ReceivedAt.IsZero() && !message.SentAt.IsZero() {
+		record.ReceivedAt = message.SentAt
+	}
+
+	// If still zero, use current time
+	if record.ReceivedAt.IsZero() {
+		record.ReceivedAt = time.Now()
+	}
+
+	// Insert single record
+	dataset := b.client.Dataset(datasetName)
+	inserter := dataset.Table("sms_messages").Inserter()
+	inserter.SkipInvalidRows = false
+	inserter.IgnoreUnknownValues = false
+
+	if err := inserter.Put(ctx, record); err != nil {
+		// If table not found, ensure tables and retry once
+		if strings.Contains(err.Error(), "notFound") || strings.Contains(err.Error(), "not found") {
+			if err := b.EnsureSMSTable(ctx, datasetName); err != nil {
+				return fmt.Errorf("failed to ensure sms_messages table: %w", err)
+			}
+			// Retry insert
+			if err := inserter.Put(ctx, record); err != nil {
+				return fmt.Errorf("failed to insert SMS message (retry): %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to insert SMS message: %w", err)
+		}
+	}
+
+	// Also insert initial status into status history
+	// This handles its own table creation and retries
+	if err := b.InsertSMSStatusHistory(ctx, datasetName, message.MessageSID, message.Status, accountID); err != nil {
+		return fmt.Errorf("failed to insert initial status history: %w", err)
+	}
+
+	return nil
+}
+
+// ListSMSMessages retrieves recent SMS messages for a tenant with their latest status
+func (b *BigQueryStore) ListSMSMessages(ctx context.Context, datasetName string, limit int) ([]*SMSRecord, error) {
+	query := b.client.Query(fmt.Sprintf(`
+		WITH LatestStatus AS (
+			SELECT 
+				message_sid,
+				status,
+				ROW_NUMBER() OVER (PARTITION BY message_sid ORDER BY timestamp DESC) as rn
+			FROM `+"`%s.sms_status_history`"+`
+		)
+		SELECT 
+			m.message_sid,
+			m.from_number,
+			m.to_number,
+			m.body,
+			m.direction,
+			COALESCE(s.status, m.status) as status,
+			m.received_at,
+			m.ingested_at,
+			m.account_id
+		FROM `+"`%s.sms_messages`"+` m
+		LEFT JOIN LatestStatus s ON m.message_sid = s.message_sid AND s.rn = 1
+		ORDER BY m.received_at DESC
+		LIMIT %d
+	`, datasetName, datasetName, limit))
+
+	query.Location = b.location
+
+	it, err := query.Read(ctx)
+	if err != nil {
+		// If dataset or table doesn't exist yet, return empty list
+		if strings.Contains(err.Error(), "Not found") || strings.Contains(err.Error(), "notFound") {
+			return []*SMSRecord{}, nil
+		}
+		return nil, fmt.Errorf("failed to query SMS messages: %w", err)
+	}
+
+	var messages []*SMSRecord
+	for {
+		var record SMSRecord
+		err := it.Next(&record)
+		if err != nil {
+			break
+		}
+		messages = append(messages, &record)
+	}
+
+	return messages, nil
+}
+
+// EnsureSMSStatusHistoryTable creates the SMS status history table if it doesn't exist
+func (b *BigQueryStore) EnsureSMSStatusHistoryTable(ctx context.Context, datasetName string) error {
+	tableRef := b.client.Dataset(datasetName).Table("sms_status_history")
+
+	// Check if table exists
+	_, err := tableRef.Metadata(ctx)
+	if err == nil {
+		// Table already exists
+		return nil
+	}
+
+	// Define schema
+	schema := bigquery.Schema{
+		{Name: "message_sid", Type: bigquery.StringFieldType, Required: true},
+		{Name: "status", Type: bigquery.StringFieldType, Required: true},
+		{Name: "timestamp", Type: bigquery.TimestampFieldType, Required: true},
+		{Name: "account_id", Type: bigquery.StringFieldType, Required: true},
+	}
+
+	// Create table
+	if err := tableRef.Create(ctx, &bigquery.TableMetadata{
+		Schema: schema,
+	}); err != nil {
+		// Ignore "Already Exists" errors (race condition)
+		if !strings.Contains(err.Error(), "Already Exists") {
+			return fmt.Errorf("failed to create sms_status_history table: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// InsertSMSStatusHistory inserts a status change event into the history table
+func (b *BigQueryStore) InsertSMSStatusHistory(ctx context.Context, datasetName, messageSID, status, accountID string) error {
+	// Ensure dataset exists
+	if err := b.CreateTenantDataset(ctx, datasetName); err != nil {
+		return err
+	}
+
+	// Ensure history table exists
+	if err := b.EnsureSMSStatusHistoryTable(ctx, datasetName); err != nil {
+		return err
+	}
+
+	// Create history record
+	record := &SMSStatusHistoryRecord{
+		MessageSID: messageSID,
+		Status:     status,
+		Timestamp:  time.Now(),
+		AccountID:  accountID,
+	}
+
+	// Insert record
+	dataset := b.client.Dataset(datasetName)
+	inserter := dataset.Table("sms_status_history").Inserter()
+	inserter.SkipInvalidRows = false
+	inserter.IgnoreUnknownValues = false
+
+	if err := inserter.Put(ctx, record); err != nil {
+		// If table not found, try to ensure it exists and retry once
+		if strings.Contains(err.Error(), "notFound") || strings.Contains(err.Error(), "not found") {
+			if err := b.EnsureSMSStatusHistoryTable(ctx, datasetName); err != nil {
+				return fmt.Errorf("failed to ensure status history table: %w", err)
+			}
+			// Retry insert
+			if err := inserter.Put(ctx, record); err != nil {
+				return fmt.Errorf("failed to insert SMS status history (retry): %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to insert SMS status history: %w", err)
+	}
+
+	return nil
 }
 
 func (b *BigQueryStore) Close() error {

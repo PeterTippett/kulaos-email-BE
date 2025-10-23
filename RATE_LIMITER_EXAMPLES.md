@@ -45,16 +45,17 @@ apiLimiter := middleware.NewAPIRateLimiter(10, 20)
 r.Use(apiLimiter.Limit)
 ```
 
-### 2. Email Send Rate Limiting (Fixed Window)
+### 2. Message Send Rate Limiting (Fixed Window)
 
 ```go
-// One email per 5 seconds
-emailLimiter := middleware.NewEmailSendRateLimiter(5 * time.Second)
+// One message (email or SMS) per 5 seconds
+messageLimiter := middleware.NewMessageSendRateLimiter(5 * time.Second)
 
-// Apply to email send endpoint only
+// Apply to email and SMS send endpoints
 r.Group(func(r chi.Router) {
-    r.Use(emailLimiter.Limit)
+    r.Use(messageLimiter.Limit)
     r.Post("/api/emails/send", handlers.SendEmail)
+    r.Post("/api/sms/send", handlers.SendSMS)
 })
 ```
 
@@ -107,11 +108,12 @@ r.Group(func(r chi.Router) {
 ### Multiple Rate Limiters on Same Endpoint
 
 ```go
-// Apply both general API limiting and specific email limiting
+// Apply both general API limiting and specific message send limiting
 r.Group(func(r chi.Router) {
     r.Use(apiLimiter.Limit)        // General API rate limit
-    r.Use(emailLimiter.Limit)      // Email-specific rate limit
+    r.Use(messageLimiter.Limit)    // Message send rate limit
     r.Post("/api/emails/send", handlers.SendEmail)
+    r.Post("/api/sms/send", handlers.SendSMS)
 })
 ```
 
@@ -182,7 +184,7 @@ customLimiter := middleware.NewRateLimiter(middleware.RateLimitConfig{
 ```go
 // Separate implementations for each use case
 generalLimiter := middleware.NewRateLimiter(10, 20)
-emailLimiter := middleware.NewEmailSendRateLimiter(10 * time.Second)
+messageLimiter := middleware.NewEmailSendRateLimiter(10 * time.Second)  // Old name
 ```
 
 ### After (Generalized)
@@ -190,7 +192,7 @@ emailLimiter := middleware.NewEmailSendRateLimiter(10 * time.Second)
 ```go
 // Single implementation with different configurations
 generalLimiter := middleware.NewAPIRateLimiter(10, 20)
-emailLimiter := middleware.NewEmailSendRateLimiter(10 * time.Second)
+messageLimiter := middleware.NewMessageSendRateLimiter(10 * time.Second)  // New name
 ```
 
 ## Future Enhancements

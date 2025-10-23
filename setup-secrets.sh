@@ -72,19 +72,69 @@ enable_secret_manager_api() {
     print_success "Secret Manager API enabled"
 }
 
-# Function to create a secret with its initial value
-create_secret() {
+# Function to process a secret (create or update)
+process_secret() {
     local secret_name="$1"
     local secret_description="$2"
-    local secret_value="$3"
+    local secret_value_var="$3"  # Variable name to store the value
     
-    print_status "Creating secret: $secret_name"
+    print_status "Processing secret: $secret_name"
     
     # Check if secret already exists
     if gcloud secrets describe "$secret_name" &> /dev/null; then
         print_warning "Secret $secret_name already exists"
+        
+        # Prompt user for action
+        echo -n "Do you want to (u)pdate with new value or (s)kip? [u/s]: "
+        read -r action
+        
+        case "$action" in
+            u|U|update|UPDATE)
+                # Prompt for new value
+                if [[ "$secret_name" == *"secret"* ]] || [[ "$secret_name" == *"token"* ]] || [[ "$secret_name" == *"auth"* ]]; then
+                    read -s -p "$secret_description: " secret_value
+                    echo ""
+                else
+                    read -p "$secret_description: " secret_value
+                fi
+                
+                if [ -z "$secret_value" ]; then
+                    print_warning "Empty value provided. Skipping secret $secret_name"
+                    return
+                fi
+                
+                print_status "Updating secret $secret_name with new value..."
+                echo -n "$secret_value" | gcloud secrets versions add "$secret_name" --data-file=- --quiet
+                print_success "Secret $secret_name updated with new value"
+                
+                # Store value in the provided variable name
+                eval "$secret_value_var='$secret_value'"
+                ;;
+            s|S|skip|SKIP)
+                print_status "Skipping secret $secret_name (keeping existing value)"
+                ;;
+            *)
+                print_warning "Invalid input. Skipping secret $secret_name"
+                ;;
+        esac
         return
     fi
+    
+    # Secret doesn't exist, prompt for value
+    if [[ "$secret_name" == *"secret"* ]] || [[ "$secret_name" == *"token"* ]] || [[ "$secret_name" == *"auth"* ]]; then
+        read -s -p "$secret_description: " secret_value
+        echo ""
+    else
+        read -p "$secret_description: " secret_value
+    fi
+    
+    if [ -z "$secret_value" ]; then
+        print_warning "Empty value provided. Skipping secret $secret_name"
+        return
+    fi
+    
+    # Store value in the provided variable name
+    eval "$secret_value_var='$secret_value'"
     
     # Create the secret with its initial value
     echo -n "$secret_value" | gcloud secrets create "$secret_name" \
@@ -94,19 +144,6 @@ create_secret() {
         --quiet
     
     print_success "Secret $secret_name created with initial value"
-}
-
-# Function to add secret version
-add_secret_version() {
-    local secret_name="$1"
-    local secret_value="$2"
-    
-    print_status "Adding version to secret: $secret_name"
-    
-    # Add the secret value
-    echo -n "$secret_value" | gcloud secrets versions add "$secret_name" --data-file=-
-    
-    print_success "Secret version added for $secret_name"
 }
 
 # Function to grant App Engine access to secrets
@@ -124,7 +161,7 @@ grant_secret_access() {
     fi
     
     # Grant access to all secrets
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
     
     for secret in "${secrets[@]}"; do
         print_status "Granting access to secret: $secret"
@@ -138,40 +175,32 @@ grant_secret_access() {
     print_success "App Engine access granted to all secrets"
 }
 
-# Function to prompt for secret values
-prompt_for_secrets() {
+# Function to process all secrets
+process_all_secrets() {
     echo ""
-    print_status "Please provide the following secret values:"
-    echo ""
-    
-    # Kinde secrets
-    read -p "Kinde Client ID: " kinde_client_id
-    read -s -p "Kinde Client Secret: " kinde_client_secret
+    print_status "Processing secrets..."
     echo ""
     
-    # Gmail secrets
-    read -p "Gmail Client ID: " gmail_client_id
-    read -s -p "Gmail Client Secret: " gmail_client_secret
+    # Process each secret (will prompt only if needed)
+    process_secret "kinde-client-id" "Kinde Client ID" "KINDE_CLIENT_ID"
     echo ""
     
-    # Store values in variables
-    KINDE_CLIENT_ID="$kinde_client_id"
-    KINDE_CLIENT_SECRET="$kinde_client_secret"
-    GMAIL_CLIENT_ID="$gmail_client_id"
-    GMAIL_CLIENT_SECRET="$gmail_client_secret"
-}
-
-# Function to create all secrets
-create_all_secrets() {
-    print_status "Creating all secrets..."
+    process_secret "kinde-client-secret" "Kinde Client Secret" "KINDE_CLIENT_SECRET"
+    echo ""
     
-    # Create secrets with their initial values
-    create_secret "kinde-client-id" "Kinde OAuth Client ID" "$KINDE_CLIENT_ID"
-    create_secret "kinde-client-secret" "Kinde OAuth Client Secret" "$KINDE_CLIENT_SECRET"
-    create_secret "gmail-client-id" "Gmail OAuth Client ID" "$GMAIL_CLIENT_ID"
-    create_secret "gmail-client-secret" "Gmail OAuth Client Secret" "$GMAIL_CLIENT_SECRET"
+    process_secret "gmail-client-id" "Gmail Client ID" "GMAIL_CLIENT_ID"
+    echo ""
     
-    print_success "All secrets created and configured"
+    process_secret "gmail-client-secret" "Gmail Client Secret" "GMAIL_CLIENT_SECRET"
+    echo ""
+    
+    process_secret "twilio-account-sid" "Twilio Account SID" "TWILIO_ACCOUNT_SID"
+    echo ""
+    
+    process_secret "twilio-auth-token" "Twilio Auth Token" "TWILIO_AUTH_TOKEN"
+    echo ""
+    
+    print_success "All secrets processed successfully"
 }
 
 # Function to show next steps
@@ -189,29 +218,36 @@ show_next_steps() {
     echo "3. Update OAuth redirect URIs after deployment:"
     echo "   - Kinde: https://your-app-id.appspot.com/api/auth/kinde/callback"
     echo "   - Gmail: https://your-app-id.appspot.com/auth/gmail/callback"
+    echo "   - Twilio: https://your-app-id.appspot.com/webhooks/{org_id}/twilio/sms"
     echo ""
     print_status "Useful commands:"
     echo "  List secrets: gcloud secrets list"
     echo "  View secret: gcloud secrets versions access latest --secret=SECRET_NAME"
     echo "  Update secret: echo 'new-value' | gcloud secrets versions add SECRET_NAME --data-file=-"
+    echo "  Update all secrets: Run this script again (./setup-secrets.sh)"
 }
 
 # Function to verify secrets
 verify_secrets() {
     print_status "Verifying secrets..."
     
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
+    local missing_count=0
     
     for secret in "${secrets[@]}"; do
         if gcloud secrets describe "$secret" &> /dev/null; then
-            print_success "Secret $secret exists"
+            print_success "✓ Secret $secret exists"
         else
-            print_error "Secret $secret does not exist"
-            exit 1
+            print_warning "✗ Secret $secret does not exist"
+            missing_count=$((missing_count + 1))
         fi
     done
     
-    print_success "All secrets verified"
+    if [ $missing_count -eq 0 ]; then
+        print_success "All secrets verified"
+    else
+        print_warning "$missing_count secret(s) missing. You may need to create them manually."
+    fi
 }
 
 # Main execution
@@ -223,8 +259,7 @@ main() {
     
     check_prerequisites
     enable_secret_manager_api
-    prompt_for_secrets
-    create_all_secrets
+    process_all_secrets
     grant_secret_access
     verify_secrets
     show_next_steps

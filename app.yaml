@@ -9,6 +9,7 @@ env_variables:
   BIGQUERY_LOCATION: "australia-southeast1"
 
   # Backend Configuration
+  BACKEND_BASE_URL: "https://kulaos-email-prod.ts.r.appspot.com"
   BACKEND_PORT: "8080" # App Engine standard port
 
   # Kinde Authentication (non-sensitive values)
@@ -17,6 +18,9 @@ env_variables:
 
   # Gmail OAuth (non-sensitive values)
   GMAIL_REDIRECT_URI: "https://kulaos-email-prod.ts.r.appspot.com/auth/gmail/callback"
+
+  # Twilio (non-sensitive values)
+  TWILIO_PHONE_NUMBER: "+61489266949"
 
   # Frontend URL
   FRONTEND_BASE_URL: "https://kulaos-email-fe.vercel.app"
@@ -32,6 +36,8 @@ env_variables:
   KINDE_CLIENT_SECRET_SECRET_NAME: "kinde-client-secret"
   GMAIL_CLIENT_ID_SECRET_NAME: "gmail-client-id"
   GMAIL_CLIENT_SECRET_SECRET_NAME: "gmail-client-secret"
+  TWILIO_ACCOUNT_SID_SECRET_NAME: "twilio-account-sid"
+  TWILIO_AUTH_TOKEN_SECRET_NAME: "twilio-auth-token"
 
 # Automatic scaling configuration
 automatic_scaling:

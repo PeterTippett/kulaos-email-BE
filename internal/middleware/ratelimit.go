@@ -189,14 +189,20 @@ func NewAPIRateLimiter(requestsPerSecond float64, burst int) *RateLimiter {
 	})
 }
 
-// NewEmailSendRateLimiter creates an email send rate limiter (fixed window)
-func NewEmailSendRateLimiter(window time.Duration) *RateLimiter {
+// NewMessageSendRateLimiter creates a message send rate limiter for emails and SMS (fixed window)
+func NewMessageSendRateLimiter(window time.Duration) *RateLimiter {
 	return NewRateLimiter(RateLimitConfig{
 		Strategy:          FixedWindow,
 		Window:            window,
-		ErrorMessage:      "email send rate limit exceeded - please wait before sending another email",
+		ErrorMessage:      "message send rate limit exceeded - please wait before sending another message",
 		IncludeRetryAfter: true,
 	})
+}
+
+// NewEmailSendRateLimiter is deprecated. Use NewMessageSendRateLimiter instead.
+// Kept for backward compatibility.
+func NewEmailSendRateLimiter(window time.Duration) *RateLimiter {
+	return NewMessageSendRateLimiter(window)
 }
 
 // NewLoginAttemptRateLimiter creates a login attempt rate limiter (fixed window)

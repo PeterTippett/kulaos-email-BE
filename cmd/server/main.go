@@ -23,6 +23,7 @@ import (
 	"github.com/yourusername/email-service/internal/logger"
 	internalMiddleware "github.com/yourusername/email-service/internal/middleware"
 	"github.com/yourusername/email-service/internal/storage"
+	"github.com/yourusername/email-service/internal/twilio"
 )
 
 func main() {
@@ -80,11 +81,15 @@ func main() {
 	// Initialize webhook handler
 	webhookHandler := gmail.NewWebhookHandler(gmailClient, accountStore, tenantStore, bqStore)
 
-	// Initialize API handlers
-	handlers := api.NewHandlers(kindeAuth, gmailOAuth, gmailClient, tenantStore, accountStore, bqStore, cfg.ProjectID, cfg.PubSubTopic, cfg.FrontendBaseURL)
+	// Initialize Twilio services
+	twilioClient := twilio.NewTwilioClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioPhoneNumber, cfg.BackendBaseURL)
+	twilioWebhook := twilio.NewWebhookHandler(tenantStore, bqStore)
 
-	// Initialize email send rate limiter (once every 5 seconds)
-	emailSendRateLimiter := internalMiddleware.NewEmailSendRateLimiter(5 * time.Second)
+	// Initialize API handlers
+	handlers := api.NewHandlers(kindeAuth, gmailOAuth, gmailClient, twilioClient, tenantStore, accountStore, bqStore, cfg.ProjectID, cfg.PubSubTopic, cfg.FrontendBaseURL)
+
+	// Initialize message send rate limiter for emails and SMS (once every 5 seconds)
+	messageSendRateLimiter := internalMiddleware.NewMessageSendRateLimiter(5 * time.Second)
 
 	// Setup chi router with middleware chain
 	r := chi.NewRouter()
@@ -106,6 +111,8 @@ func main() {
 	r.Get("/health", handlers.Health)
 	r.Get("/auth/gmail/callback", handlers.GmailCallback)
 	r.Post("/webhooks/gmail", webhookHandler.HandleGmailWebhook)
+	r.Post("/webhooks/{org_id}/twilio/sms", twilioWebhook.HandleInboundSMS)
+	r.Post("/webhooks/{org_id}/twilio/status", twilioWebhook.HandleStatusCallback)
 	// Cloud Scheduler endpoint for refreshing Gmail watch subscriptions
 	// TODO: Add authentication middleware to ensure only Cloud Scheduler can call this
 	// See: https://cloud.google.com/scheduler/docs/http-target-auth
@@ -118,14 +125,16 @@ func main() {
 		r.Get("/auth/gmail/start", handlers.StartGmailAuth)
 		r.Get("/api/accounts", handlers.ListAccounts)
 		r.Get("/api/emails", handlers.ListEmails)
+		r.Get("/api/sms", handlers.ListSMS)
 		r.Delete("/api/accounts/{accountID}", handlers.DeleteAccount)
 	})
 
-	// Email send endpoint with authentication and rate limiting
+	// Email and SMS send endpoints with authentication and rate limiting
 	r.Group(func(r chi.Router) {
 		r.Use(kindeAuth.Middleware)
-		r.Use(emailSendRateLimiter.Limit)
+		r.Use(messageSendRateLimiter.Limit)
 		r.Post("/api/emails/send", handlers.SendEmail)
+		r.Post("/api/sms/send", handlers.SendSMS)
 	})
 
 	// Create server

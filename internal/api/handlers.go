@@ -18,12 +18,14 @@ import (
 	"github.com/yourusername/email-service/internal/gmail"
 	"github.com/yourusername/email-service/internal/logger"
 	"github.com/yourusername/email-service/internal/storage"
+	"github.com/yourusername/email-service/internal/types"
 )
 
 type Handlers struct {
 	kindeAuth       *auth.KindeAuth
 	gmailOAuth      *gmail.GmailOAuth
 	gmailClient     *gmail.GmailClient
+	twilioClient    TwilioClient
 	tenantStore     *datastore.TenantStore
 	accountStore    *datastore.AccountStore
 	bqStore         *storage.BigQueryStore
@@ -32,10 +34,16 @@ type Handlers struct {
 	frontendBaseURL string
 }
 
+// TwilioClient interface for sending SMS
+type TwilioClient interface {
+	SendSMS(ctx context.Context, to, body, orgID string) (*types.SMSMessage, error)
+}
+
 func NewHandlers(
 	kindeAuth *auth.KindeAuth,
 	gmailOAuth *gmail.GmailOAuth,
 	gmailClient *gmail.GmailClient,
+	twilioClient TwilioClient,
 	tenantStore *datastore.TenantStore,
 	accountStore *datastore.AccountStore,
 	bqStore *storage.BigQueryStore,
@@ -47,6 +55,7 @@ func NewHandlers(
 		kindeAuth:       kindeAuth,
 		gmailOAuth:      gmailOAuth,
 		gmailClient:     gmailClient,
+		twilioClient:    twilioClient,
 		tenantStore:     tenantStore,
 		accountStore:    accountStore,
 		bqStore:         bqStore,
@@ -594,5 +603,118 @@ func (h *Handlers) SendEmail(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":  "success",
 		"message": "Email sent successfully",
+	})
+}
+
+// SendSMSRequest represents the request body for sending an SMS
+type SendSMSRequest struct {
+	To   string `json:"to"`
+	Body string `json:"body"`
+}
+
+// SendSMS handles sending SMS via Twilio
+func (h *Handlers) SendSMS(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	orgID := auth.GetOrgID(ctx)
+
+	if orgID == "" {
+		http.Error(w, "organization ID not found", http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body
+	var req SendSMSRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate required fields
+	if req.To == "" || req.Body == "" {
+		http.Error(w, "missing required fields: to, body", http.StatusBadRequest)
+		return
+	}
+
+	// Basic phone number validation (simple check for + and digits)
+	if !regexp.MustCompile(`^\+?[1-9]\d{1,14}$`).MatchString(req.To) {
+		http.Error(w, "invalid phone number format (use E.164 format, e.g., +1234567890)", http.StatusBadRequest)
+		return
+	}
+
+	// Get tenant
+	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
+	if err != nil {
+		logger.FromContext(ctx).Error("Failed to get tenant",
+			zap.String("org_id", orgID),
+			zap.Error(err))
+		http.Error(w, "tenant not found", http.StatusNotFound)
+		return
+	}
+
+	// Send SMS via Twilio (passing orgID for status callback routing)
+	message, err := h.twilioClient.SendSMS(ctx, req.To, req.Body, orgID)
+	if err != nil {
+		logger.FromContext(ctx).Error("Failed to send SMS",
+			zap.String("to", req.To),
+			zap.Error(err))
+		http.Error(w, "failed to send SMS", http.StatusInternalServerError)
+		return
+	}
+
+	// Store outbound message in BigQuery
+	if err := h.bqStore.InsertSMSMessage(ctx, tenant.BigQueryDataset, message, orgID); err != nil {
+		logger.FromContext(ctx).Warn("Failed to store SMS in BigQuery",
+			zap.String("message_sid", message.MessageSID),
+			zap.Error(err))
+		// Don't fail the request - SMS was sent successfully
+	}
+
+	logger.FromContext(ctx).Info("Successfully sent SMS",
+		zap.String("to", req.To),
+		zap.String("message_sid", message.MessageSID))
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "success",
+		"message":     "SMS sent successfully",
+		"message_sid": message.MessageSID,
+	})
+}
+
+// ListSMS returns recent SMS messages for the authenticated org
+func (h *Handlers) ListSMS(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	orgID := auth.GetOrgID(ctx)
+
+	if orgID == "" {
+		http.Error(w, "organization ID not found", http.StatusBadRequest)
+		return
+	}
+
+	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"messages": []interface{}{},
+		})
+		return
+	}
+
+	// Query BigQuery for recent SMS messages
+	messages, err := h.bqStore.ListSMSMessages(ctx, tenant.BigQueryDataset, 50)
+	if err != nil {
+		logger.FromContext(ctx).Warn("Failed to list SMS messages", zap.Error(err))
+		// Return empty list if dataset doesn't exist yet
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"messages": []interface{}{},
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"messages": messages,
 	})
 }

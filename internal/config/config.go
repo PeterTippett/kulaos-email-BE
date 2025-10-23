@@ -35,13 +35,19 @@ type Config struct {
 	GmailRedirectURI  string
 
 	// Backend
-	BackendPort string
+	BackendPort    string
+	BackendBaseURL string
 
 	// Frontend
 	FrontendBaseURL string
 
 	// Pub/Sub
 	PubSubTopic string
+
+	// Twilio
+	TwilioAccountSID  string
+	TwilioAuthToken   string
+	TwilioPhoneNumber string
 }
 
 // ValidationError represents a configuration validation error
@@ -72,8 +78,12 @@ func Load() (*Config, error) {
 		GmailClientSecret:            os.Getenv("GMAIL_CLIENT_SECRET"),
 		GmailRedirectURI:             os.Getenv("GMAIL_REDIRECT_URI"),
 		BackendPort:                  getEnvOrDefault("BACKEND_PORT", "8085"),
+		BackendBaseURL:               os.Getenv("BACKEND_BASE_URL"),
 		FrontendBaseURL:              os.Getenv("FRONTEND_BASE_URL"),
 		PubSubTopic:                  os.Getenv("PUBSUB_TOPIC"),
+		TwilioAccountSID:             os.Getenv("TWILIO_ACCOUNT_SID"),
+		TwilioAuthToken:              os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioPhoneNumber:            os.Getenv("TWILIO_PHONE_NUMBER"),
 	}
 
 	// Validate configuration
@@ -99,8 +109,12 @@ func (c *Config) Validate() error {
 		"GMAIL_CLIENT_ID":     c.GmailClientID,
 		"GMAIL_CLIENT_SECRET": c.GmailClientSecret,
 		"GMAIL_REDIRECT_URI":  c.GmailRedirectURI,
+		"BACKEND_BASE_URL":    c.BackendBaseURL,
 		"FRONTEND_BASE_URL":   c.FrontendBaseURL,
 		"PUBSUB_TOPIC":        c.PubSubTopic,
+		"TWILIO_ACCOUNT_SID":  c.TwilioAccountSID,
+		"TWILIO_AUTH_TOKEN":   c.TwilioAuthToken,
+		"TWILIO_PHONE_NUMBER": c.TwilioPhoneNumber,
 	}
 
 	for field, value := range requiredFields {
@@ -142,6 +156,7 @@ func (c *Config) Validate() error {
 	urlFields := map[string]string{
 		"KINDE_REDIRECT_URI": c.KindeRedirectURI,
 		"GMAIL_REDIRECT_URI": c.GmailRedirectURI,
+		"BACKEND_BASE_URL":   c.BackendBaseURL,
 		"FRONTEND_BASE_URL":  c.FrontendBaseURL,
 	}
 
