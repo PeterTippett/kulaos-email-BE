@@ -127,16 +127,15 @@ The following environment variables must be set in `app.yaml`:
 - `KINDE_DOMAIN`: Your Kinde domain
 - `KINDE_CLIENT_ID`: Kinde OAuth client ID
 - `KINDE_CLIENT_SECRET`: Kinde OAuth client secret
-- `KINDE_REDIRECT_URI`: Kinde callback URL
 
 ### Gmail Integration
 
 - `GMAIL_CLIENT_ID`: Gmail OAuth client ID
 - `GMAIL_CLIENT_SECRET`: Gmail OAuth client secret
-- `GMAIL_REDIRECT_URI`: Gmail callback URL
 
 ### Application
 
+- `BACKEND_BASE_URL`: Your backend application URL (used to construct redirect URIs)
 - `BACKEND_PORT`: "8080" (App Engine standard)
 - `FRONTEND_BASE_URL`: Your frontend application URL
 - `PUBSUB_TOPIC`: Pub/Sub topic name

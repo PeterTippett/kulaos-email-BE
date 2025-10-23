@@ -75,7 +75,8 @@ func main() {
 	kindeAuth := auth.NewKindeAuth(cfg.KindeDomain, cfg.KindeClientID, cfg.KindeClientSecret)
 
 	// Initialize Gmail services
-	gmailOAuth := gmail.NewGmailOAuth(cfg.GmailClientID, cfg.GmailClientSecret, cfg.GmailRedirectURI)
+	gmailRedirectURI := fmt.Sprintf("%s/auth/gmail/callback", cfg.BackendBaseURL)
+	gmailOAuth := gmail.NewGmailOAuth(cfg.GmailClientID, cfg.GmailClientSecret, gmailRedirectURI)
 	gmailClient := gmail.NewGmailClient(gmailOAuth)
 
 	// Initialize webhook handler

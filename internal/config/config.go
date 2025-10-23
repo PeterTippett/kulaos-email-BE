@@ -27,12 +27,10 @@ type Config struct {
 	KindeDomain       string
 	KindeClientID     string
 	KindeClientSecret string
-	KindeRedirectURI  string
 
 	// Gmail
 	GmailClientID     string
 	GmailClientSecret string
-	GmailRedirectURI  string
 
 	// Backend
 	BackendPort    string
@@ -73,10 +71,8 @@ func Load() (*Config, error) {
 		KindeDomain:                  os.Getenv("KINDE_DOMAIN"),
 		KindeClientID:                os.Getenv("KINDE_CLIENT_ID"),
 		KindeClientSecret:            os.Getenv("KINDE_CLIENT_SECRET"),
-		KindeRedirectURI:             os.Getenv("KINDE_REDIRECT_URI"),
 		GmailClientID:                os.Getenv("GMAIL_CLIENT_ID"),
 		GmailClientSecret:            os.Getenv("GMAIL_CLIENT_SECRET"),
-		GmailRedirectURI:             os.Getenv("GMAIL_REDIRECT_URI"),
 		BackendPort:                  getEnvOrDefault("BACKEND_PORT", "8085"),
 		BackendBaseURL:               os.Getenv("BACKEND_BASE_URL"),
 		FrontendBaseURL:              os.Getenv("FRONTEND_BASE_URL"),
@@ -105,10 +101,8 @@ func (c *Config) Validate() error {
 		"KINDE_DOMAIN":        c.KindeDomain,
 		"KINDE_CLIENT_ID":     c.KindeClientID,
 		"KINDE_CLIENT_SECRET": c.KindeClientSecret,
-		"KINDE_REDIRECT_URI":  c.KindeRedirectURI,
 		"GMAIL_CLIENT_ID":     c.GmailClientID,
 		"GMAIL_CLIENT_SECRET": c.GmailClientSecret,
-		"GMAIL_REDIRECT_URI":  c.GmailRedirectURI,
 		"BACKEND_BASE_URL":    c.BackendBaseURL,
 		"FRONTEND_BASE_URL":   c.FrontendBaseURL,
 		"PUBSUB_TOPIC":        c.PubSubTopic,
@@ -152,12 +146,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate URLs
+	// Validate URLs (redirect URIs are constructed from BACKEND_BASE_URL, so no need to validate separately)
 	urlFields := map[string]string{
-		"KINDE_REDIRECT_URI": c.KindeRedirectURI,
-		"GMAIL_REDIRECT_URI": c.GmailRedirectURI,
-		"BACKEND_BASE_URL":   c.BackendBaseURL,
-		"FRONTEND_BASE_URL":  c.FrontendBaseURL,
+		"BACKEND_BASE_URL":  c.BackendBaseURL,
+		"FRONTEND_BASE_URL": c.FrontendBaseURL,
 	}
 
 	for field, value := range urlFields {

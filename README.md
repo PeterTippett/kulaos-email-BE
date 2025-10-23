@@ -245,15 +245,14 @@ BIGQUERY_LOCATION=australia-southeast1
 KINDE_DOMAIN=your-tenant.kinde.com
 KINDE_CLIENT_ID=your-kinde-client-id
 KINDE_CLIENT_SECRET=your-kinde-client-secret
-KINDE_REDIRECT_URI=http://localhost:3005/api/auth/kinde/callback
 
 # Gmail
 GMAIL_CLIENT_ID=your-gmail-oauth-client-id
 GMAIL_CLIENT_SECRET=your-gmail-oauth-secret
-GMAIL_REDIRECT_URI=http://localhost:8085/auth/gmail/callback
 
 # Backend
 BACKEND_PORT=8085
+BACKEND_BASE_URL=https://xxxxxx.ngrok-free.app
 
 # Pub/Sub
 PUBSUB_TOPIC=gmail-notifications
@@ -607,7 +606,7 @@ The backend now validates all configuration on startup. You may see errors like:
 configuration validation failed:
   - PROJECT_ID: is required but not set
   - KINDE_DOMAIN: should not include protocol (e.g., 'your-tenant.kinde.com', not 'https://your-tenant.kinde.com')
-  - GMAIL_REDIRECT_URI: 'invalid-url' is not a valid URL
+  - BACKEND_BASE_URL: 'invalid-url' is not a valid URL
 ```
 
 **Solution**:
@@ -615,9 +614,10 @@ configuration validation failed:
 1. Check your `.env` file contains all required variables:
 
    - `PROJECT_ID`, `KMS_KEYRING`, `PUBSUB_TOPIC`
-   - `KINDE_DOMAIN`, `KINDE_CLIENT_ID`, `KINDE_CLIENT_SECRET`, `KINDE_REDIRECT_URI`
-   - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REDIRECT_URI`
-   - `FRONTEND_BASE_URL`
+   - `KINDE_DOMAIN`, `KINDE_CLIENT_ID`, `KINDE_CLIENT_SECRET`
+   - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`
+   - `BACKEND_BASE_URL`, `FRONTEND_BASE_URL`
+   - Note: `KINDE_REDIRECT_URI` and `GMAIL_REDIRECT_URI` are automatically constructed from `BACKEND_BASE_URL`
 
 2. Verify values are properly formatted:
 
@@ -647,8 +647,10 @@ configuration validation failed:
 
 **Solution**:
 
-- Verify `GMAIL_REDIRECT_URI` in `.env` matches Google Cloud Console
-- Check callback URL is `http://localhost:8085/auth/gmail/callback`
+- The redirect URI is automatically constructed as `{BACKEND_BASE_URL}/auth/gmail/callback`
+- Verify `BACKEND_BASE_URL` in `.env` matches your actual backend URL
+- Check callback URL in Google Cloud Console matches the constructed URI (e.g., `http://localhost:8085/auth/gmail/callback`)
+- For Kinde, the URI is constructed as `{BACKEND_BASE_URL}/api/auth/kinde/callback`
 
 **Problem**: Invalid client credentials
 

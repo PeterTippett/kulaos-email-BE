@@ -14,10 +14,6 @@ env_variables:
 
   # Kinde Authentication (non-sensitive values)
   KINDE_DOMAIN: "kulaos.kinde.com"
-  KINDE_REDIRECT_URI: "https://kulaos-email-prod.ts.r.appspot.com/api/auth/kinde/callback"
-
-  # Gmail OAuth (non-sensitive values)
-  GMAIL_REDIRECT_URI: "https://kulaos-email-prod.ts.r.appspot.com/auth/gmail/callback"
 
   # Twilio (non-sensitive values)
   TWILIO_PHONE_NUMBER: "+61489266949"
