@@ -469,10 +469,24 @@ func (h *MCPHandlers) SendSMS(
 		return nil, SendSMSOutput{}, fmt.Errorf("invalid phone number format, must be E.164 format (e.g., +1234567890)")
 	}
 
+	// Get tenant for BigQuery dataset
+	tenant, err := h.tenantStore.GetTenant(ctx, orgID)
+	if err != nil {
+		return nil, SendSMSOutput{}, fmt.Errorf("tenant not found: %w", err)
+	}
+
 	// Send SMS
 	sms, err := h.twilioClient.SendSMS(ctx, input.To, input.Body, orgID)
 	if err != nil {
 		return nil, SendSMSOutput{}, fmt.Errorf("failed to send SMS: %w", err)
+	}
+
+	// Store outbound message in BigQuery
+	if err := h.bqStore.InsertSMSMessage(ctx, tenant.BigQueryDataset, sms, orgID); err != nil {
+		logger.FromContext(ctx).Warn("Failed to store SMS in BigQuery",
+			zap.String("message_sid", sms.MessageSID),
+			zap.Error(err))
+		// Don't fail the request - SMS was sent successfully
 	}
 
 	logger.FromContext(ctx).Info("SMS sent successfully",
