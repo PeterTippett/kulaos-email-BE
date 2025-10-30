@@ -63,6 +63,13 @@ echo -n "your-kinde-client-secret" | gcloud secrets create kinde-client-secret -
 # Create Gmail secrets
 echo -n "your-gmail-client-id" | gcloud secrets create gmail-client-id --data-file=-
 echo -n "your-gmail-client-secret" | gcloud secrets create gmail-client-secret --data-file=-
+
+# Create Twilio secrets
+echo -n "your-twilio-account-sid" | gcloud secrets create twilio-account-sid --data-file=-
+echo -n "your-twilio-auth-token" | gcloud secrets create twilio-auth-token --data-file=-
+
+# Create MCP secret (Model Context Protocol shared key for authentication)
+echo -n "your-mcp-shared-key" | gcloud secrets create mcp-shared-key --data-file=-
 ```
 
 ## App Engine Configuration
@@ -94,6 +101,12 @@ secret_environment_variables:
     secret: gmail-client-id
   - key: GMAIL_CLIENT_SECRET
     secret: gmail-client-secret
+  - key: TWILIO_ACCOUNT_SID
+    secret: twilio-account-sid
+  - key: TWILIO_AUTH_TOKEN
+    secret: twilio-auth-token
+  - key: MCP_SHARED_KEY
+    secret: mcp-shared-key
 ```
 
 ## IAM Permissions

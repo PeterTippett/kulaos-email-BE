@@ -555,6 +555,15 @@ type EmailListResult struct {
 	TotalPages int
 }
 
+// SMSListResult represents a paginated list of SMS messages
+type SMSListResult struct {
+	Messages   []*SMSRecord
+	Total      int
+	Page       int
+	PerPage    int
+	TotalPages int
+}
+
 func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limit int) ([]*EmailRecord, error) {
 	result, err := b.ListEmailsPaginated(ctx, datasetName, 1, limit)
 	if err != nil {
@@ -822,6 +831,112 @@ func (b *BigQueryStore) ListSMSMessages(ctx context.Context, datasetName string,
 	}
 
 	return messages, nil
+}
+
+// ListSMSMessagesPaginated retrieves SMS messages with pagination
+func (b *BigQueryStore) ListSMSMessagesPaginated(ctx context.Context, datasetName string, page, perPage int) (*SMSListResult, error) {
+	// Validate pagination parameters
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 20 // default
+	}
+
+	offset := (page - 1) * perPage
+
+	// First, get total count
+	countQuery := b.client.Query(fmt.Sprintf(`
+		SELECT COUNT(*) as total
+		FROM `+"`%s.sms_messages`"+`
+	`, datasetName))
+	countQuery.Location = b.location
+
+	countIt, err := countQuery.Read(ctx)
+	if err != nil {
+		// If dataset or table doesn't exist yet, return empty result
+		if strings.Contains(err.Error(), "Not found") || strings.Contains(err.Error(), "notFound") {
+			return &SMSListResult{
+				Messages:   []*SMSRecord{},
+				Total:      0,
+				Page:       page,
+				PerPage:    perPage,
+				TotalPages: 0,
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to count SMS messages: %w", err)
+	}
+
+	var countResult struct {
+		Total int64 `bigquery:"total"`
+	}
+	err = countIt.Next(&countResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read count: %w", err)
+	}
+
+	total := int(countResult.Total)
+	totalPages := (total + perPage - 1) / perPage
+
+	// Now get the paginated results
+	query := b.client.Query(fmt.Sprintf(`
+		WITH LatestStatus AS (
+			SELECT 
+				message_sid,
+				status,
+				ROW_NUMBER() OVER (PARTITION BY message_sid ORDER BY timestamp DESC) as rn
+			FROM `+"`%s.sms_status_history`"+`
+		)
+		SELECT 
+			m.message_sid,
+			m.from_number,
+			m.to_number,
+			m.body,
+			m.direction,
+			COALESCE(s.status, m.status) as status,
+			m.received_at,
+			m.ingested_at,
+			m.account_id
+		FROM `+"`%s.sms_messages`"+` m
+		LEFT JOIN LatestStatus s ON m.message_sid = s.message_sid AND s.rn = 1
+		ORDER BY m.received_at DESC
+		LIMIT %d OFFSET %d
+	`, datasetName, datasetName, perPage, offset))
+
+	query.Location = b.location
+
+	it, err := query.Read(ctx)
+	if err != nil {
+		// If dataset or table doesn't exist yet, return empty result
+		if strings.Contains(err.Error(), "Not found") || strings.Contains(err.Error(), "notFound") {
+			return &SMSListResult{
+				Messages:   []*SMSRecord{},
+				Total:      0,
+				Page:       page,
+				PerPage:    perPage,
+				TotalPages: 0,
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to query SMS messages: %w", err)
+	}
+
+	var messages []*SMSRecord
+	for {
+		var record SMSRecord
+		err := it.Next(&record)
+		if err != nil {
+			break
+		}
+		messages = append(messages, &record)
+	}
+
+	return &SMSListResult{
+		Messages:   messages,
+		Total:      total,
+		Page:       page,
+		PerPage:    perPage,
+		TotalPages: totalPages,
+	}, nil
 }
 
 // EnsureSMSStatusHistoryTable creates the SMS status history table if it doesn't exist

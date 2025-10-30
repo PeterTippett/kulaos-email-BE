@@ -161,7 +161,7 @@ grant_secret_access() {
     fi
     
     # Grant access to all secrets
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token" "mcp-shared-key")
     
     for secret in "${secrets[@]}"; do
         print_status "Granting access to secret: $secret"
@@ -200,6 +200,9 @@ process_all_secrets() {
     process_secret "twilio-auth-token" "Twilio Auth Token" "TWILIO_AUTH_TOKEN"
     echo ""
     
+    process_secret "mcp-shared-key" "MCP Shared Key" "MCP_SHARED_KEY"
+    echo ""
+    
     print_success "All secrets processed successfully"
 }
 
@@ -231,7 +234,7 @@ show_next_steps() {
 verify_secrets() {
     print_status "Verifying secrets..."
     
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token" "mcp-shared-key")
     local missing_count=0
     
     for secret in "${secrets[@]}"; do

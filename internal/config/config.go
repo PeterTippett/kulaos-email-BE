@@ -46,6 +46,10 @@ type Config struct {
 	TwilioAccountSID  string
 	TwilioAuthToken   string
 	TwilioPhoneNumber string
+
+	// MCP
+	MCPEnabled   bool
+	MCPSharedKey string
 }
 
 // ValidationError represents a configuration validation error
@@ -80,6 +84,8 @@ func Load() (*Config, error) {
 		TwilioAccountSID:             os.Getenv("TWILIO_ACCOUNT_SID"),
 		TwilioAuthToken:              os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioPhoneNumber:            os.Getenv("TWILIO_PHONE_NUMBER"),
+		MCPEnabled:                   getEnvOrDefault("MCP_ENABLED", "true") == "true",
+		MCPSharedKey:                 os.Getenv("MCP_SHARED_KEY"),
 	}
 
 	// Validate configuration

@@ -14,6 +14,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	mcpSDK "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/yourusername/email-service/internal/api"
 	"github.com/yourusername/email-service/internal/auth"
 	"github.com/yourusername/email-service/internal/config"
@@ -21,6 +23,7 @@ import (
 	"github.com/yourusername/email-service/internal/encryption"
 	"github.com/yourusername/email-service/internal/gmail"
 	"github.com/yourusername/email-service/internal/logger"
+	"github.com/yourusername/email-service/internal/mcp"
 	internalMiddleware "github.com/yourusername/email-service/internal/middleware"
 	"github.com/yourusername/email-service/internal/storage"
 	"github.com/yourusername/email-service/internal/twilio"
@@ -92,6 +95,63 @@ func main() {
 	// Initialize message send rate limiter for emails and SMS (once every 5 seconds)
 	messageSendRateLimiter := internalMiddleware.NewMessageSendRateLimiter(5 * time.Second)
 
+	// Initialize MCP server if enabled
+	var mcpServer *mcp.Server
+	var mcpQuotaStore *datastore.MCPQuotaStore
+	var mcpAuthMiddleware *internalMiddleware.MCPAuthMiddleware
+	var mcpHandler http.Handler
+
+	if cfg.MCPEnabled {
+		logger.Get().Info("Initializing MCP server")
+
+		// Validate MCP shared key
+		if cfg.MCPSharedKey == "" {
+			logger.Get().Fatal("MCP_SHARED_KEY is required when MCP is enabled")
+		}
+
+		// Initialize MCP quota store
+		mcpQuotaStore, err = datastore.NewMCPQuotaStore(ctx, cfg.ProjectID)
+		if err != nil {
+			logger.Get().Fatal("Failed to create MCP quota store", zap.Error(err))
+		}
+		defer mcpQuotaStore.Close()
+
+		// Initialize quota checker
+		quotaChecker := mcp.NewQuotaChecker(mcpQuotaStore)
+
+		// Initialize MCP handlers
+		mcpHandlers := mcp.NewMCPHandlers(
+			gmailClient,
+			twilioClient,
+			tenantStore,
+			accountStore,
+			bqStore,
+			quotaChecker,
+		)
+
+		// Create MCP server
+		mcpServer, err = mcp.NewServer(mcpHandlers)
+		if err != nil {
+			logger.Get().Fatal("Failed to create MCP server", zap.Error(err))
+		}
+
+		// Create HTTP handler that returns the server for each request
+		httpHandler := mcpSDK.NewStreamableHTTPHandler(
+			func(r *http.Request) *mcpSDK.Server {
+				return mcpServer.GetMCPServer()
+			},
+			nil,
+		)
+
+		// Create MCP authentication middleware with shared key
+		mcpAuthMiddleware = internalMiddleware.NewMCPAuthMiddleware(cfg.MCPSharedKey)
+
+		// Wrap with auth middleware
+		mcpHandler = mcpAuthMiddleware.Middleware(httpHandler)
+
+		logger.Get().Info("MCP server initialized successfully")
+	}
+
 	// Setup chi router with middleware chain
 	r := chi.NewRouter()
 
@@ -137,6 +197,14 @@ func main() {
 		r.Post("/api/emails/send", handlers.SendEmail)
 		r.Post("/api/sms/send", handlers.SendSMS)
 	})
+
+	// MCP routes (if enabled)
+	if cfg.MCPEnabled {
+		// MCP endpoint with shared key authentication
+		r.Post("/mcp", mcpHandler.ServeHTTP)
+
+		logger.Get().Info("MCP endpoint registered at /mcp")
+	}
 
 	// Create server
 	server := &http.Server{
@@ -219,7 +287,8 @@ func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 					w.Header().Set("Vary", "Origin")
 					w.Header().Set("Access-Control-Allow-Credentials", "true")
 					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
+					w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
 				}
 			}
 

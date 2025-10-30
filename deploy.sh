@@ -109,7 +109,7 @@ grant_secret_manager_access() {
     print_status "Granting Secret Manager access to App Engine..."
     
     local app_engine_sa="$PROJECT_ID@appspot.gserviceaccount.com"
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token" "mcp-shared-key")
     
     for secret in "${secrets[@]}"; do
         print_status "Granting access to secret: $secret"
@@ -140,7 +140,7 @@ validate_config() {
     fi
     
     # Check if secrets exist in Secret Manager
-    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token")
+    local secrets=("kinde-client-id" "kinde-client-secret" "gmail-client-id" "gmail-client-secret" "twilio-account-sid" "twilio-auth-token" "mcp-shared-key")
     for secret in "${secrets[@]}"; do
         if ! gcloud secrets describe "$secret" &> /dev/null; then
             print_error "Secret $secret does not exist in Secret Manager."

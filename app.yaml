@@ -27,13 +27,23 @@ env_variables:
   # Environment
   ENVIRONMENT: "production"
 
-  # Secret Manager secret names (for runtime fetching)
-  KINDE_CLIENT_ID_SECRET_NAME: "kinde-client-id"
-  KINDE_CLIENT_SECRET_SECRET_NAME: "kinde-client-secret"
-  GMAIL_CLIENT_ID_SECRET_NAME: "gmail-client-id"
-  GMAIL_CLIENT_SECRET_SECRET_NAME: "gmail-client-secret"
-  TWILIO_ACCOUNT_SID_SECRET_NAME: "twilio-account-sid"
-  TWILIO_AUTH_TOKEN_SECRET_NAME: "twilio-auth-token"
+# Sensitive values from Secret Manager
+# App Engine automatically injects these as environment variables
+secret_environment_variables:
+  - key: KINDE_CLIENT_ID
+    secret: kinde-client-id
+  - key: KINDE_CLIENT_SECRET
+    secret: kinde-client-secret
+  - key: GMAIL_CLIENT_ID
+    secret: gmail-client-id
+  - key: GMAIL_CLIENT_SECRET
+    secret: gmail-client-secret
+  - key: TWILIO_ACCOUNT_SID
+    secret: twilio-account-sid
+  - key: TWILIO_AUTH_TOKEN
+    secret: twilio-auth-token
+  - key: MCP_SHARED_KEY
+    secret: mcp-shared-key
 
 # Automatic scaling configuration
 automatic_scaling:
