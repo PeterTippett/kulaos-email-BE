@@ -584,20 +584,30 @@ func (b *BigQueryStore) ListEmailsPaginatedWithFilter(ctx context.Context, datas
 	if perPage < 1 || perPage > 100 {
 		perPage = 50 // default
 	}
+	// Prevent integer overflow
+	if page > 1000000 {
+		return nil, fmt.Errorf("page number exceeds safe limit")
+	}
 
 	offset := (page - 1) * perPage
 
-	// Build WHERE clause for account_id filter
-	whereClause := ""
+	// First, get total count using parameterized query
+	var countQuery *bigquery.Query
 	if accountID != "" {
-		whereClause = fmt.Sprintf(" WHERE account_id = '%s'", accountID)
+		countQuery = b.client.Query(fmt.Sprintf(`
+			SELECT COUNT(*) as total
+			FROM `+"`%s.emails`"+`
+			WHERE account_id = @account_id
+		`, datasetName))
+		countQuery.Parameters = []bigquery.QueryParameter{
+			{Name: "account_id", Value: accountID},
+		}
+	} else {
+		countQuery = b.client.Query(fmt.Sprintf(`
+			SELECT COUNT(*) as total
+			FROM `+"`%s.emails`"+`
+		`, datasetName))
 	}
-
-	// First, get total count
-	countQuery := b.client.Query(fmt.Sprintf(`
-		SELECT COUNT(*) as total
-		FROM `+"`%s.emails`"+`%s
-	`, datasetName, whereClause))
 	countQuery.Location = b.location
 
 	countIt, err := countQuery.Read(ctx)
@@ -626,29 +636,59 @@ func (b *BigQueryStore) ListEmailsPaginatedWithFilter(ctx context.Context, datas
 	total := int(countResult.Total)
 	totalPages := (total + perPage - 1) / perPage
 
-	// Now get the paginated results
-	query := b.client.Query(fmt.Sprintf(`
-		SELECT 
-			message_id,
-			thread_id,
-			account_id,
-			sender,
-			sender_name,
-			recipients,
-			cc_recipients,
-			bcc_recipients,
-			subject,
-			body_text,
-			body_html,
-			body_markdown,
-			received_at,
-			ingested_at,
-			is_read,
-			labels
-		FROM `+"`%s.emails`"+`%s
-		ORDER BY received_at DESC
-		LIMIT %d OFFSET %d
-	`, datasetName, whereClause, perPage, offset))
+	// Now get the paginated results using parameterized query
+	var query *bigquery.Query
+	if accountID != "" {
+		query = b.client.Query(fmt.Sprintf(`
+			SELECT 
+				message_id,
+				thread_id,
+				account_id,
+				sender,
+				sender_name,
+				recipients,
+				cc_recipients,
+				bcc_recipients,
+				subject,
+				body_text,
+				body_html,
+				body_markdown,
+				received_at,
+				ingested_at,
+				is_read,
+				labels
+			FROM `+"`%s.emails`"+`
+			WHERE account_id = @account_id
+			ORDER BY received_at DESC
+			LIMIT %d OFFSET %d
+		`, datasetName, perPage, offset))
+		query.Parameters = []bigquery.QueryParameter{
+			{Name: "account_id", Value: accountID},
+		}
+	} else {
+		query = b.client.Query(fmt.Sprintf(`
+			SELECT 
+				message_id,
+				thread_id,
+				account_id,
+				sender,
+				sender_name,
+				recipients,
+				cc_recipients,
+				bcc_recipients,
+				subject,
+				body_text,
+				body_html,
+				body_markdown,
+				received_at,
+				ingested_at,
+				is_read,
+				labels
+			FROM `+"`%s.emails`"+`
+			ORDER BY received_at DESC
+			LIMIT %d OFFSET %d
+		`, datasetName, perPage, offset))
+	}
 
 	// Set the query location to match where datasets are created
 	query.Location = b.location

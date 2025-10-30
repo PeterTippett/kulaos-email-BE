@@ -80,12 +80,20 @@ func (h *MCPHandlers) HandleEmailsList(ctx context.Context, req *mcpSDK.ReadReso
 	perPage := getIntQueryParam(params, "per_page", 20)
 	accountID := params.Get("account_id")
 
-	// Validate
+	// Validate pagination
 	if page < 1 {
 		page = 1
 	}
 	if perPage < 1 || perPage > 50 {
 		perPage = 20
+	}
+
+	// Validate accountID format if provided (UUIDs only)
+	if accountID != "" {
+		// Simple UUID format validation
+		if len(accountID) != 36 || accountID[8] != '-' || accountID[13] != '-' || accountID[18] != '-' || accountID[23] != '-' {
+			return nil, fmt.Errorf("invalid account_id format")
+		}
 	}
 
 	// Get tenant

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -66,8 +67,8 @@ func (m *MCPAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		privateKey := parts[2]
 		scope := parts[3]
 
-		// Validate private key matches shared secret
-		if privateKey != m.sharedKey {
+		// Validate private key matches shared secret using constant-time comparison to prevent timing attacks
+		if len(privateKey) != len(m.sharedKey) || subtle.ConstantTimeCompare([]byte(privateKey), []byte(m.sharedKey)) != 1 {
 			logger.FromContext(ctx).Warn("Invalid private key",
 				zap.String("org_id", orgID),
 				zap.String("user_id", userID))
