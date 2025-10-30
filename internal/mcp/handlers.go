@@ -374,8 +374,8 @@ func (h *MCPHandlers) SendEmail(
 		return nil, SendEmailOutput{}, fmt.Errorf("tenant not found: %w", err)
 	}
 
-	// Get Gmail account
-	account, err := h.accountStore.GetAccount(ctx, tenant.Namespace, input.AccountID)
+	// Get Gmail account with decrypted tokens
+	account, err := h.accountStore.GetAccountWithDecryptedTokens(ctx, tenant.Namespace, orgID, input.AccountID)
 	if err != nil {
 		return nil, SendEmailOutput{}, fmt.Errorf("account not found: %w", err)
 	}
