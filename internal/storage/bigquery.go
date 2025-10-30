@@ -573,6 +573,10 @@ func (b *BigQueryStore) ListEmails(ctx context.Context, datasetName string, limi
 }
 
 func (b *BigQueryStore) ListEmailsPaginated(ctx context.Context, datasetName string, page, perPage int) (*EmailListResult, error) {
+	return b.ListEmailsPaginatedWithFilter(ctx, datasetName, page, perPage, "")
+}
+
+func (b *BigQueryStore) ListEmailsPaginatedWithFilter(ctx context.Context, datasetName string, page, perPage int, accountID string) (*EmailListResult, error) {
 	// Validate pagination parameters
 	if page < 1 {
 		page = 1
@@ -583,11 +587,17 @@ func (b *BigQueryStore) ListEmailsPaginated(ctx context.Context, datasetName str
 
 	offset := (page - 1) * perPage
 
+	// Build WHERE clause for account_id filter
+	whereClause := ""
+	if accountID != "" {
+		whereClause = fmt.Sprintf(" WHERE account_id = '%s'", accountID)
+	}
+
 	// First, get total count
 	countQuery := b.client.Query(fmt.Sprintf(`
 		SELECT COUNT(*) as total
-		FROM `+"`%s.emails`"+`
-	`, datasetName))
+		FROM `+"`%s.emails`"+`%s
+	`, datasetName, whereClause))
 	countQuery.Location = b.location
 
 	countIt, err := countQuery.Read(ctx)
@@ -635,10 +645,10 @@ func (b *BigQueryStore) ListEmailsPaginated(ctx context.Context, datasetName str
 			ingested_at,
 			is_read,
 			labels
-		FROM `+"`%s.emails`"+`
+		FROM `+"`%s.emails`"+`%s
 		ORDER BY received_at DESC
 		LIMIT %d OFFSET %d
-	`, datasetName, perPage, offset))
+	`, datasetName, whereClause, perPage, offset))
 
 	// Set the query location to match where datasets are created
 	query.Location = b.location

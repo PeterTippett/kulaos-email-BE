@@ -94,22 +94,10 @@ func (h *MCPHandlers) HandleEmailsList(ctx context.Context, req *mcpSDK.ReadReso
 		return nil, fmt.Errorf("tenant not found: %w", err)
 	}
 
-	// Query emails using paginated method
-	result, err := h.bqStore.ListEmailsPaginated(ctx, tenant.BigQueryDataset, page, perPage)
+	// Query emails using paginated method with optional account filter
+	result, err := h.bqStore.ListEmailsPaginatedWithFilter(ctx, tenant.BigQueryDataset, page, perPage, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list emails: %w", err)
-	}
-
-	// Filter by account if specified
-	var filteredEmails []*storage.EmailRecord
-	if accountID != "" {
-		for _, email := range result.Emails {
-			if email.AccountID == accountID {
-				filteredEmails = append(filteredEmails, email)
-			}
-		}
-		result.Emails = filteredEmails
-		result.Total = len(filteredEmails)
 	}
 
 	jsonData, err := json.Marshal(result)
