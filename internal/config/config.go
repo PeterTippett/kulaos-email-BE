@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/joho/godotenv"
 )
 
@@ -63,29 +66,72 @@ func (e *ValidationError) Error() string {
 }
 
 func Load() (*Config, error) {
-	// Try to load .env file (ignore error if not found)
-	_ = godotenv.Load()
+	ctx := context.Background()
+
+	// Only load .env file in development (not on App Engine)
+	// App Engine sets GAE_ENV, GAE_APPLICATION, or GOOGLE_CLOUD_PROJECT
+	if os.Getenv("GAE_ENV") == "" && os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
+		_ = godotenv.Load() // Ignore error if .env not found
+	}
+
+	projectID := os.Getenv("PROJECT_ID")
+
+	// Fetch secrets - first try direct env vars, then Secret Manager
+	kindeClientID, err := getEnvOrSecretManager(ctx, projectID, "KINDE_CLIENT_ID", "KINDE_CLIENT_ID_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KINDE_CLIENT_ID: %w", err)
+	}
+
+	kindeClientSecret, err := getEnvOrSecretManager(ctx, projectID, "KINDE_CLIENT_SECRET", "KINDE_CLIENT_SECRET_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KINDE_CLIENT_SECRET: %w", err)
+	}
+
+	gmailClientID, err := getEnvOrSecretManager(ctx, projectID, "GMAIL_CLIENT_ID", "GMAIL_CLIENT_ID_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load GMAIL_CLIENT_ID: %w", err)
+	}
+
+	gmailClientSecret, err := getEnvOrSecretManager(ctx, projectID, "GMAIL_CLIENT_SECRET", "GMAIL_CLIENT_SECRET_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load GMAIL_CLIENT_SECRET: %w", err)
+	}
+
+	twilioAccountSID, err := getEnvOrSecretManager(ctx, projectID, "TWILIO_ACCOUNT_SID", "TWILIO_ACCOUNT_SID_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TWILIO_ACCOUNT_SID: %w", err)
+	}
+
+	twilioAuthToken, err := getEnvOrSecretManager(ctx, projectID, "TWILIO_AUTH_TOKEN", "TWILIO_AUTH_TOKEN_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TWILIO_AUTH_TOKEN: %w", err)
+	}
+
+	mcpSharedKey, err := getEnvOrSecretManager(ctx, projectID, "MCP_SHARED_KEY", "MCP_SHARED_KEY_SECRET_NAME")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load MCP_SHARED_KEY: %w", err)
+	}
 
 	cfg := &Config{
-		ProjectID:                    os.Getenv("PROJECT_ID"),
+		ProjectID:                    projectID,
 		GoogleApplicationCredentials: os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
 		KMSLocation:                  getEnvOrDefault("KMS_LOCATION", "global"),
 		KMSKeyring:                   os.Getenv("KMS_KEYRING"),
 		BigQueryLocation:             getEnvOrDefault("BIGQUERY_LOCATION", "australia-southeast1"),
 		KindeDomain:                  os.Getenv("KINDE_DOMAIN"),
-		KindeClientID:                os.Getenv("KINDE_CLIENT_ID"),
-		KindeClientSecret:            os.Getenv("KINDE_CLIENT_SECRET"),
-		GmailClientID:                os.Getenv("GMAIL_CLIENT_ID"),
-		GmailClientSecret:            os.Getenv("GMAIL_CLIENT_SECRET"),
+		KindeClientID:                kindeClientID,
+		KindeClientSecret:            kindeClientSecret,
+		GmailClientID:                gmailClientID,
+		GmailClientSecret:            gmailClientSecret,
 		BackendPort:                  getEnvOrDefault("BACKEND_PORT", "8085"),
 		BackendBaseURL:               os.Getenv("BACKEND_BASE_URL"),
 		FrontendBaseURL:              os.Getenv("FRONTEND_BASE_URL"),
 		PubSubTopic:                  os.Getenv("PUBSUB_TOPIC"),
-		TwilioAccountSID:             os.Getenv("TWILIO_ACCOUNT_SID"),
-		TwilioAuthToken:              os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioAccountSID:             twilioAccountSID,
+		TwilioAuthToken:              twilioAuthToken,
 		TwilioPhoneNumber:            os.Getenv("TWILIO_PHONE_NUMBER"),
 		MCPEnabled:                   getEnvOrDefault("MCP_ENABLED", "true") == "true",
-		MCPSharedKey:                 os.Getenv("MCP_SHARED_KEY"),
+		MCPSharedKey:                 mcpSharedKey,
 	}
 
 	// Validate configuration
@@ -251,4 +297,40 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// fetchSecretFromGCP fetches a secret from Google Secret Manager
+func fetchSecretFromGCP(ctx context.Context, projectID, secretName string) (string, error) {
+	client, err := secretmanager.NewClient(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to create secret manager client: %w", err)
+	}
+	defer client.Close()
+
+	name := fmt.Sprintf("projects/%s/secrets/%s/versions/latest", projectID, secretName)
+	result, err := client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
+		Name: name,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to access secret %s: %w", secretName, err)
+	}
+
+	return string(result.Payload.Data), nil
+}
+
+// getEnvOrSecretManager gets a value from env var directly, or from Secret Manager if *_SECRET_NAME is set
+func getEnvOrSecretManager(ctx context.Context, projectID, directEnvKey, secretNameEnvKey string) (string, error) {
+	// First, try direct environment variable (for local dev)
+	if value := os.Getenv(directEnvKey); value != "" {
+		return value, nil
+	}
+
+	// Otherwise, check for secret name in *_SECRET_NAME env var
+	secretName := os.Getenv(secretNameEnvKey)
+	if secretName == "" {
+		return "", nil // Not configured
+	}
+
+	// Fetch from Secret Manager
+	return fetchSecretFromGCP(ctx, projectID, secretName)
 }

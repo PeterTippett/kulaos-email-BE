@@ -13,6 +13,11 @@
 .git
 .gitignore
 
+# Environment files (CRITICAL: never deploy these!)
+.env
+.env.*
+service-account-key.json
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -23,3 +28,27 @@
 *.test
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+
+# Logs
+*.log
+output.log
+
+# Documentation
+*.md
+
+# Scripts
+*.sh
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test directories
+test/
