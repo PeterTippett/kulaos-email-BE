@@ -95,6 +95,10 @@ func main() {
 	// Initialize message send rate limiter for emails and SMS (once every 5 seconds)
 	messageSendRateLimiter := internalMiddleware.NewMessageSendRateLimiter(5 * time.Second)
 
+	// Initialize MCP rate limiter (10 requests per second, burst of 20)
+	mcpRateLimiter := internalMiddleware.NewAPIRateLimiter(10, 20)
+	defer mcpRateLimiter.Stop() // Clean up on shutdown
+
 	// Initialize MCP server if enabled
 	var mcpServer *mcp.Server
 	var mcpQuotaStore *datastore.MCPQuotaStore
@@ -146,8 +150,8 @@ func main() {
 		// Create MCP authentication middleware with shared key
 		mcpAuthMiddleware = internalMiddleware.NewMCPAuthMiddleware(cfg.MCPSharedKey)
 
-		// Wrap with auth middleware
-		mcpHandler = mcpAuthMiddleware.Middleware(httpHandler)
+		// Wrap with auth middleware and rate limiting
+		mcpHandler = mcpAuthMiddleware.Middleware(mcpRateLimiter.Limit(httpHandler))
 
 		logger.Get().Info("MCP server initialized successfully")
 	}

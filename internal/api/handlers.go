@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +19,7 @@ import (
 	"github.com/yourusername/email-service/internal/logger"
 	"github.com/yourusername/email-service/internal/storage"
 	"github.com/yourusername/email-service/internal/types"
+	"github.com/yourusername/email-service/internal/validation"
 )
 
 type Handlers struct {
@@ -550,10 +550,15 @@ func (h *Handlers) SendEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic email format validation
-	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
-	if !emailRegex.MatchString(req.To) {
-		http.Error(w, "invalid email format", http.StatusBadRequest)
+	// Validate account ID format
+	if err := validation.ValidateAccountID(req.AccountID); err != nil {
+		http.Error(w, "invalid account_id format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate email format
+	if err := validation.ValidateEmail(req.To); err != nil {
+		http.Error(w, "invalid email address format", http.StatusBadRequest)
 		return
 	}
 
@@ -665,9 +670,9 @@ func (h *Handlers) SendSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic phone number validation (simple check for + and digits)
-	if !regexp.MustCompile(`^\+?[1-9]\d{1,14}$`).MatchString(req.To) {
-		http.Error(w, "invalid phone number format (use E.164 format, e.g., +1234567890)", http.StatusBadRequest)
+	// Validate phone number format (E.164)
+	if err := validation.ValidateE164Phone(req.To); err != nil {
+		http.Error(w, "invalid phone number format, must be E.164 format (e.g., +14155552671)", http.StatusBadRequest)
 		return
 	}
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/yourusername/email-service/internal/logger"
 	"github.com/yourusername/email-service/internal/storage"
 	"github.com/yourusername/email-service/internal/types"
+	"github.com/yourusername/email-service/internal/validation"
 )
 
 // MCPHandlers contains all MCP handlers and their dependencies
@@ -88,11 +88,10 @@ func (h *MCPHandlers) HandleEmailsList(ctx context.Context, req *mcpSDK.ReadReso
 		perPage = 20
 	}
 
-	// Validate accountID format if provided (UUIDs only)
+	// Validate accountID format if provided
 	if accountID != "" {
-		// Simple UUID format validation
-		if len(accountID) != 36 || accountID[8] != '-' || accountID[13] != '-' || accountID[18] != '-' || accountID[23] != '-' {
-			return nil, fmt.Errorf("invalid account_id format")
+		if err := validation.ValidateAccountID(accountID); err != nil {
+			return nil, fmt.Errorf("invalid account_id: %w", err)
 		}
 	}
 
@@ -353,15 +352,19 @@ func (h *MCPHandlers) SendEmail(
 		return nil, SendEmailOutput{}, err
 	}
 
-	// Validate input
+	// Validate required fields
 	if input.AccountID == "" || input.To == "" || input.Subject == "" {
 		return nil, SendEmailOutput{}, fmt.Errorf("account_id, to, and subject are required")
 	}
 
-	// Validate email format
-	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-	if !emailRegex.MatchString(input.To) {
-		return nil, SendEmailOutput{}, fmt.Errorf("invalid email address format")
+	// Validate account ID format
+	if err := validation.ValidateAccountID(input.AccountID); err != nil {
+		return nil, SendEmailOutput{}, fmt.Errorf("invalid account_id: %w", err)
+	}
+
+	// Validate email format using proper validation
+	if err := validation.ValidateEmail(input.To); err != nil {
+		return nil, SendEmailOutput{}, fmt.Errorf("invalid recipient email address: %w", err)
 	}
 
 	// Get tenant for namespace
@@ -454,15 +457,14 @@ func (h *MCPHandlers) SendSMS(
 		return nil, SendSMSOutput{}, err
 	}
 
-	// Validate input
+	// Validate required fields
 	if input.To == "" || input.Body == "" {
 		return nil, SendSMSOutput{}, fmt.Errorf("to and body are required")
 	}
 
 	// Validate phone number format (E.164)
-	phoneRegex := regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
-	if !phoneRegex.MatchString(input.To) {
-		return nil, SendSMSOutput{}, fmt.Errorf("invalid phone number format, must be E.164 format (e.g., +1234567890)")
+	if err := validation.ValidateE164Phone(input.To); err != nil {
+		return nil, SendSMSOutput{}, fmt.Errorf("invalid phone number (must be E.164 format, e.g., +14155552671): %w", err)
 	}
 
 	// Get tenant for BigQuery dataset

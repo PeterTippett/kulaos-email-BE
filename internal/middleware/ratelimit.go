@@ -36,15 +36,25 @@ type RateLimiter struct {
 	limiters map[string]*rate.Limiter // For TokenBucket strategy
 	lastSent map[string]time.Time     // For FixedWindow strategy
 	mu       sync.RWMutex
+	stopCh   chan struct{} // Channel to signal cleanup goroutine to stop
+	started  bool          // Track if cleanup is running
 }
 
 // NewRateLimiter creates a new rate limiter with the specified configuration
 func NewRateLimiter(config RateLimitConfig) *RateLimiter {
-	return &RateLimiter{
+	rl := &RateLimiter{
 		config:   config,
 		limiters: make(map[string]*rate.Limiter),
 		lastSent: make(map[string]time.Time),
+		stopCh:   make(chan struct{}),
+		started:  false,
 	}
+	// Start cleanup goroutine for FixedWindow strategy
+	if config.Strategy == FixedWindow {
+		go rl.cleanupLoop()
+		rl.started = true
+	}
+	return rl
 }
 
 // NewTokenBucketRateLimiter creates a token bucket rate limiter (backward compatibility)
@@ -151,29 +161,44 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 	})
 }
 
-// Cleanup removes inactive rate limiters (call periodically to prevent memory leaks)
-func (rl *RateLimiter) Cleanup() {
+// Stop gracefully stops the cleanup goroutine
+func (rl *RateLimiter) Stop() {
+	if rl.started {
+		close(rl.stopCh)
+		rl.started = false
+	}
+}
+
+// cleanupLoop runs in a goroutine to periodically clean up old entries
+func (rl *RateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		rl.mu.Lock()
-
-		if rl.config.Strategy == FixedWindow {
-			// Clean up old entries for fixed window
-			now := time.Now()
-			for identifier, lastSent := range rl.lastSent {
-				if now.Sub(lastSent) > time.Hour {
-					delete(rl.lastSent, identifier)
-				}
-			}
-		} else {
-			// For token bucket, we keep all limiters since they're lightweight
-			_ = len(rl.limiters) // Prevent empty critical section warning
+	for {
+		select {
+		case <-ticker.C:
+			rl.cleanup()
+		case <-rl.stopCh:
+			return
 		}
-
-		rl.mu.Unlock()
 	}
+}
+
+// cleanup removes inactive rate limiters to prevent memory leaks
+func (rl *RateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	if rl.config.Strategy == FixedWindow {
+		// Clean up old entries for fixed window
+		now := time.Now()
+		for identifier, lastSent := range rl.lastSent {
+			if now.Sub(lastSent) > time.Hour {
+				delete(rl.lastSent, identifier)
+			}
+		}
+	}
+	// For token bucket, we keep all limiters since they're lightweight
 }
 
 // Example usage functions for different rate limiting scenarios
